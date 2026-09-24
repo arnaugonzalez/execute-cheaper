@@ -18,8 +18,9 @@ the verdict is not `ok`, its findings go back to the executor for a repair round
 ## Quickstart
 
 Requires Python 3.11+, git and at least one agent CLI. The default config tries, in order,
-[Codex CLI](https://github.com/openai/codex) (`codex login` with a ChatGPT plan; model names available
-to your plan change often, check them with `codex` → `/model`), Antigravity `agy`,
+[Codex CLI](https://github.com/openai/codex) (`codex login` with a ChatGPT account; the preset models work
+even on the Free plan. Paid plans unlock stronger models and the names change often: check yours
+with `codex` → `/model`), Antigravity `agy`,
 and [Claude Code](https://docs.claude.com/en/docs/claude-code) on [OpenRouter](https://openrouter.ai/keys)
 with an API key. The verifier is Claude Code on your own Claude login. Providers you don't have are
 skipped; edit the chain to match what you use.
@@ -135,10 +136,11 @@ For the first two rows the OpenRouter balance moved $0.2551, against $0.2639 est
 | DeepSeek V4.1 Flash executes, Sonnet 5 verifies (`verified OK`, 1 round) | $0.0031 · 70k tokens · 23 s | $0.1219 · 142k tokens | **$0.125** |
 | Sonnet 5 executes, no verification | $0.1389 · 185k tokens · 22 s | — | **$0.139** |
 | DeepSeek executes, Sonnet verifies on a Claude subscription (`--verify claude-login`, `verified OK`) | $0.0033 · 70k tokens · 6 s | subscription (Claude Code prices it at $0.137) | **$0.003 paid** |
-| Codex `gpt-5.6-luna` executes, Codex `gpt-5.6-terra` verifies, ChatGPT plan (`--chain codex --verify codex`, `verified OK`) | subscription · 114k tokens · 40 s | subscription · 73k tokens | **$0 paid** |
+| Codex `gpt-5.6-luna` executes, Codex `gpt-5.6-terra` verifies, **ChatGPT Free plan** (`--chain codex --verify codex`, `verified OK`) | free plan · 114k tokens · 40 s | free plan · 73k tokens | **$0** |
 
 On a plan this small the verifier dominates the bill, so verifying on a subscription you already
-pay for is where the saving is. The cheaper executor matters more as plans grow.
+pay for is where the saving is. The Free-plan row costs nothing but has tight usage limits; it
+shows the loop works without any paid account, not that it scales for free. The cheaper executor matters more as plans grow.
 
 ## Events and integrations
 
