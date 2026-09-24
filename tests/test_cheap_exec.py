@@ -222,7 +222,7 @@ class CheapExecTest(unittest.TestCase):
     def test_verifier_is_read_only_and_isolated(self):
         log_path = self.tmp / "args.log"
         self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_ARGS_LOG": str(log_path)})
-        verifier_line = next(line for line in log_path.read_text().splitlines() if "--json-schema" in line)
+        verifier_line = next(line for line in log_path.read_text(errors="replace").splitlines() if "--json-schema" in line)
         self.assertIn("https://judge.example/anthropic", verifier_line)
         for tool in ("Edit", "Write", "MultiEdit"):
             self.assertIn(tool, verifier_line.split("--disallowedTools", 1)[1])
@@ -239,7 +239,7 @@ class CheapExecTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("codex: OK", r.stdout)
         self.assertTrue((self.repo / "codex-was-here.txt").exists())
-        self.assertEqual(log_path.read_text().splitlines(),
+        self.assertEqual(log_path.read_text(errors="replace").splitlines(),
                          ["codex sandbox=workspace-write schema=", "codex sandbox=read-only schema=yes"])
         ex = next(e for e in self.ledger() if e["role"] == "executor")
         self.assertEqual((ex["input"], ex["cached"], ex["output"], ex["billing"]), (600, 400, 50, "subscription"))
@@ -251,7 +251,7 @@ class CheapExecTest(unittest.TestCase):
         r = self.run_cli("run", "--plan", "PLAN.md", "--verify", "codex", extra_env={"FAKE_ARGS_LOG": str(log_path)})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("codex/c-pro", r.stdout)
-        self.assertNotIn("judge-only-model", log_path.read_text())
+        self.assertNotIn("judge-only-model", log_path.read_text(errors="replace"))
 
     def test_codex_expired_login_falls_back_with_hint(self):
         self.config["chain"] = ["codex", "cheapapi"]
