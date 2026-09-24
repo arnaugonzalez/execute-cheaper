@@ -45,7 +45,8 @@ RUNS_DIR = STATE_DIR / "runs"
 LEDGER_PATH = STATE_DIR / "ledger.jsonl"
 PROFILE_DIR = STATE_DIR / "claude-profile"
 
-KINDS = ("claude", "codex", "agy")
+KINDS = ("claude", "codex", "agy", "cli")
+VERIFIER_KINDS = ("claude", "codex")  # the only adapters that can enforce the verdict's JSON schema
 TIERS = ("flash", "pro")
 
 DEFAULT_CONFIG: dict = {
@@ -60,7 +61,7 @@ DEFAULT_CONFIG: dict = {
 # Prices: USD per 1M tokens [input, cached input, output(, cache write)], as listed by each provider on prices_as_of.
 # Cache writes default to the input price; Anthropic models charge 1.25x input for them.
 EXAMPLE_CONFIG: dict = {
-    "chain": ["codex", "agy", "openrouter"],
+    "chain": ["codex", "copilot", "agy", "openrouter"],
     "verify": {"provider": "claude-login", "tier": "pro", "timeout_s": 1800},
     "max_rounds": 2,
     "on_event": None,
@@ -69,6 +70,20 @@ EXAMPLE_CONFIG: dict = {
         "codex": {
             "kind": "codex",
             "models": {"flash": "gpt-5.6-luna", "pro": "gpt-5.6-terra"},
+            "timeout_s": 3600,
+            "billing": "subscription",
+        },
+        "copilot": {
+            "kind": "cli",
+            "cmd": ["copilot", "-p", "{prompt}", "--model", "{model}", "--yolo", "--no-ask-user", "--no-auto-update",
+                    "--disable-builtin-mcps", "--no-color", "-s", "--usage-output-file", "{run_dir}/{label}-usage.json"],
+            "fail_re": "^Execution failed",
+            "usage_file": "{run_dir}/{label}-usage.json",
+            "usage": {"input_tokens": "tokenDetails.input.tokenCount",
+                      "cache_read_input_tokens": "tokenDetails.cache_read.tokenCount",
+                      "cache_creation_input_tokens": "tokenDetails.cache_write.tokenCount",
+                      "output_tokens": "tokenDetails.output.tokenCount"},
+            "models": {"flash": "auto", "pro": "auto"},
             "timeout_s": 3600,
             "billing": "subscription",
         },
@@ -144,6 +159,9 @@ EXAMPLE_CONFIG: dict = {
 AGY_QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED \(code 429\)[^\n]*?Resets in ([0-9hms]+)", re.I)
 CODEX_QUOTA_RE = re.compile(r"usage limit|rate limit|quota|429|too many requests", re.I)
 CODEX_AUTH_RE = re.compile(r"sign in again|log ?in|401 unauthorized|not logged in", re.I)
+# Defaults for kind "cli"; a preset overrides them with its own quota_re / auth_re.
+CLI_QUOTA_RE = r"usage limit|rate limit|quota|429|too many requests|resource_exhausted|premium requests"
+CLI_AUTH_RE = r"not (?:logged|signed) in|log ?in (?:required|first)|unauthorized|401|error authenticating"
 CLAUDE_QUOTA_RE = re.compile(r"usage limit|rate limit|out of (?:extra )?usage|quota|resets? (?:at|in) ([^\n\"]+)|429", re.I)
 
 VERIFY_SCHEMA = {
@@ -208,11 +226,19 @@ def validate_config(cfg: dict) -> list[str]:
     vp = (cfg.get("verify") or {}).get("provider")
     if vp and vp not in providers:
         errs.append(f"verify.provider: unknown provider '{vp}'")
-    if vp and providers.get(vp, {}).get("kind") == "agy":
+    if vp and vp in providers and providers[vp].get("kind") not in VERIFIER_KINDS:
         errs.append("verify.provider: the verifier must be a 'claude' or 'codex' provider (it needs a JSON schema)")
     for name, p in providers.items():
         if p.get("kind") not in KINDS:
             errs.append(f"providers.{name}.kind must be one of {KINDS}, got {p.get('kind')!r}")
+        if p.get("kind") == "cli":
+            if not (isinstance(p.get("cmd"), list) and p["cmd"] and all(isinstance(a, str) for a in p["cmd"])):
+                errs.append(f"providers.{name}.cmd must be a non-empty list of strings (argv with {{prompt}} etc.)")
+            for field in ("fail_re", "quota_re", "auth_re"):
+                try:
+                    re.compile(p.get(field) or "")
+                except re.error as e:
+                    errs.append(f"providers.{name}.{field} is not a valid regex: {e}")
         models = p.get("models") or {}
         for tier in TIERS:
             if not models.get(tier):
@@ -656,6 +682,92 @@ def run_codex(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, 
     return {"ok": True, "text": text, "structured": structured, "reason": None, "usage": usage}
 
 
+# --- adapter: cli (any headless coding CLI, described by config) ------------
+
+def jpath(data, path: str) -> list:
+    """Leaves at a dotted path inside nested dicts; '*' descends into every key (e.g. per-model stats)."""
+    cur = [data]
+    for part in path.split("."):
+        cur = [v for c in cur if isinstance(c, dict) for v in (c.values() if part == "*" else [c.get(part)])]
+    return [c for c in cur if c is not None]
+
+
+def run_cli(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, pcfg: dict, key: str | None) -> dict:
+    """Executor for any coding CLI with a headless mode (Copilot, Gemini CLI, cursor-agent, opencode...).
+    The provider config describes it (README → kind "cli"):
+    - cmd: argv with {prompt} {model} {run_dir} {label} placeholders; without {prompt}, the prompt goes to stdin.
+    - output: "text" (default: stdout is the executor's report) or "json" (stdout is one JSON document or JSON
+      lines; "text_field" is the dotted path of the report inside it).
+    - usage: {"input_tokens": "dotted.path", ...} into that JSON, or into "usage_file" when the CLI writes one.
+    - fail_re / quota_re / auth_re: matched against stdout+stderr because some CLIs exit 0 on failure."""
+    subs = {"prompt": prompt, "model": model, "run_dir": str(run_dir), "label": label}
+    via_stdin = not any("{prompt}" in str(a) for a in pcfg["cmd"])
+    cmd = []
+    for arg in pcfg["cmd"]:
+        for k, v in subs.items():
+            arg = str(arg).replace("{" + k + "}", v)
+        cmd.append(arg)
+    if not via_stdin and len(prompt.encode("utf-8")) > 100_000:
+        return {"ok": False, "text": "", "reason": "prompt too large for one argv entry (Linux caps it at 128 KiB): "
+                                                   "use a cmd without {prompt} so it goes through stdin"}
+    env = dict(os.environ)
+    for k, v in (pcfg.get("env") or {}).items():
+        env[k] = str(v).replace("$KEY", key or "")
+    (run_dir / f"{label}-prompt.md").write_text(prompt, encoding="utf-8")
+    log(f"{label} > {cmd[0]} ({model}{', prompt on stdin' if via_stdin else ''})")
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, input=prompt if via_stdin else None, env=env, capture_output=True,
+                              text=True, timeout=pcfg.get("timeout_s", 3600), check=False)
+    except FileNotFoundError:
+        return {"ok": False, "text": "", "reason": f"binary not found: {cmd[0]}"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "text": "", "reason": "timeout"}
+    out, err = proc.stdout or "", proc.stderr or ""
+    (run_dir / f"{label}-stdout.txt").write_text(out, encoding="utf-8")
+    if err:
+        (run_dir / f"{label}-stderr.txt").write_text(err, encoding="utf-8")
+    both = out + "\n" + err
+    fail_re = pcfg.get("fail_re")
+    failed = proc.returncode != 0 or bool(fail_re and re.search(fail_re, both, re.I | re.M))
+    if failed:
+        tail = both.strip()[-300:]
+        if re.search(pcfg.get("auth_re") or CLI_AUTH_RE, both, re.I):
+            return {"ok": False, "text": "", "reason": f"not logged in: run `{cmd[0]}` once and sign in ({tail[:120]})"}
+        if re.search(pcfg.get("quota_re") or CLI_QUOTA_RE, both, re.I):
+            return {"ok": False, "text": "", "reason": "quota", "reset_s": int(pcfg.get("quota_reset_s", 3600))}
+        return {"ok": False, "text": out, "reason": f"exit {proc.returncode}: {tail}"}
+    text, data = out, None
+    if pcfg.get("output") == "json":
+        candidates = [out.strip()] + [ln.strip() for ln in reversed(out.splitlines()) if ln.strip().startswith("{")]
+        for c in candidates:
+            try:
+                data = json.loads(c)
+                break
+            except json.JSONDecodeError:
+                continue
+        if not isinstance(data, dict):
+            return {"ok": False, "text": out, "reason": f"expected JSON on stdout, got: {out.strip()[:200]!r}"}
+        if pcfg.get("text_field"):
+            leaves = jpath(data, pcfg["text_field"])
+            text = str(leaves[0]) if leaves else ""
+    usage = {}
+    if pcfg.get("usage"):
+        src = data
+        if pcfg.get("usage_file"):
+            path = Path(pcfg["usage_file"].replace("{run_dir}", str(run_dir)).replace("{label}", label))
+            if path.exists():
+                try:
+                    src = json.loads(path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    src = None
+        for counter, upath in pcfg["usage"].items():
+            usage[counter] = sum(n for n in jpath(src, upath) if isinstance(n, (int, float)))
+    if not text.strip():
+        return {"ok": False, "text": "", "reason": "the CLI exited 0 but printed nothing: check its headless flags",
+                "usage": usage}
+    return {"ok": True, "text": text, "reason": None, "usage": usage}
+
+
 def run_executor(name: str, pcfg: dict, prompt: str, cwd: Path, run_dir: Path, tier: str, secrets: dict) -> dict:
     model = pcfg["models"][tier]
     if pcfg["kind"] == "agy":
@@ -665,6 +777,8 @@ def run_executor(name: str, pcfg: dict, prompt: str, cwd: Path, run_dir: Path, t
     key = provider_key(pcfg, secrets)
     if pcfg.get("key_env") and not key:
         return {"ok": False, "text": "", "reason": f"missing key {pcfg['key_env']} (env or {ENV_PATH})"}
+    if pcfg["kind"] == "cli":
+        return run_cli(prompt, cwd, run_dir, name, model=model, pcfg=pcfg, key=key)
     env, config_dir = claude_env(pcfg, key, model)
     return run_claude(prompt, cwd, run_dir, name, model=model, env=env, config_dir=config_dir,
                       timeout_s=pcfg.get("timeout_s", 3600), max_budget=pcfg.get("max_budget_usd"),
@@ -939,11 +1053,11 @@ def cmd_status(_: argparse.Namespace) -> int:
     print(f"chain: {cfg['chain']} · verifier: {cfg['verify'].get('provider') or 'none'} · rounds: {cfg['max_rounds']}")
     used = set(cfg["chain"]) | ({cfg["verify"]["provider"]} if cfg["verify"].get("provider") else set())
     for name, p in (cfg.get("providers") or {}).items():
-        binary = p.get("bin") or p.get("kind")
+        binary = p.get("bin") or (p["cmd"][0] if p.get("kind") == "cli" and p.get("cmd") else p.get("kind"))
         if p.get("use_login"):
             auth = "own Claude Code login"
-        elif p.get("kind") in ("codex", "agy"):
-            auth = f"own {p['kind']} login"
+        elif p.get("kind") in ("codex", "agy") or (p.get("kind") == "cli" and not p.get("key_env")):
+            auth = f"own {binary} login"
         elif p.get("key_env"):
             auth = f"{p['key_env']} {'present' if provider_key(p, secrets) else 'MISSING'}"
         elif p.get("base_url"):

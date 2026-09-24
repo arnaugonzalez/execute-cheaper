@@ -1,0 +1,9 @@
+{
+  "opencode": {
+    "kind": "cli",
+    "cmd": ["opencode", "run", "-m", "{model}", "{prompt}"],
+    "models": {"flash": "<provider>/<cheap-model>", "pro": "<provider>/<strong-model>"},
+    "timeout_s": 3600,
+    "billing": "paid"
+  }
+}

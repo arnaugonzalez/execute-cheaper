@@ -1,0 +1,19 @@
+{
+  "gemini": {
+    "kind": "cli",
+    "key_env": "GEMINI_API_KEY",
+    "env": {"GEMINI_API_KEY": "$KEY"},
+    "cmd": ["gemini", "-m", "{model}", "-o", "json", "--approval-mode", "yolo", "--skip-trust", "-p", "{prompt}"],
+    "output": "json",
+    "text_field": "response",
+    "usage": {
+      "input_tokens": "stats.models.*.tokens.prompt",
+      "cache_read_input_tokens": "stats.models.*.tokens.cached",
+      "output_tokens": "stats.models.*.tokens.candidates"
+    },
+    "quota_re": "RESOURCE_EXHAUSTED|429|quota",
+    "models": {"flash": "gemini-3.8-flash", "pro": "gemini-3.1-pro"},
+    "timeout_s": 3600,
+    "billing": "paid"
+  }
+}

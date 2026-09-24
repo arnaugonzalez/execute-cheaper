@@ -86,6 +86,28 @@ FAKE_CODEX = textwrap.dedent(r"""
     echo '{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":50}}'
 """).strip()
 
+# Generic headless CLI (kind "cli"): Copilot-like argv, plus a usage file. FAKE_CLI picks the behaviour.
+FAKE_CLI = textwrap.dedent(r"""
+    #!/usr/bin/env bash
+    prompt=""; model=""; usage=""
+    while [ $# -gt 0 ]; do
+      case "$1" in -p) prompt="$2"; shift;; --model) model="$2"; shift;; --usage-output-file) usage="$2"; shift;; esac
+      shift
+    done
+    [ -z "$prompt" ] && prompt="$(cat)"
+    [ -n "${FAKE_ARGS_LOG:-}" ] && echo "cli model=$model prompt_len=${#prompt}" >> "$FAKE_ARGS_LOG"
+    case "${FAKE_CLI:-ok}" in
+      fail0) echo "Execution failed: Error: The requested model is not supported."; exit 0;;
+      quota) echo "Error: You have exceeded your premium requests for this month." >&2; exit 1;;
+      auth) echo "Error: not logged in. Run the CLI and sign in." >&2; exit 1;;
+      json) echo '{"response":"files changed: cli-was-here.txt","stats":{"models":{"m-a":{"tokens":{"prompt":100,"cached":40,"candidates":7}},"m-b":{"tokens":{"prompt":50,"cached":0,"candidates":3}}}}}'
+            echo "done by cli" > cli-was-here.txt; exit 0;;
+    esac
+    echo "done by cli" > cli-was-here.txt
+    [ -n "$usage" ] && echo '{"tokenDetails":{"input":{"tokenCount":3},"cache_read":{"tokenCount":0},"cache_write":{"tokenCount":15707},"output":{"tokenCount":5}}}' > "$usage"
+    echo "files changed: cli-was-here.txt"
+""").strip()
+
 HOOK = "cat >> \"$HOOK_LOG\"; echo >> \"$HOOK_LOG\""
 
 
@@ -113,6 +135,7 @@ class CheapExecTest(unittest.TestCase):
         self.write_bin("claude", FAKE_CLAUDE)
         self.write_bin("agy", FAKE_AGY_OK)
         self.write_bin("codex", FAKE_CODEX)
+        self.write_bin("fake-cli", FAKE_CLI)
         self.config = {
             "chain": ["agy", "cheapapi"],
             "verify": {"provider": "judge", "tier": "pro"},
@@ -127,6 +150,15 @@ class CheapExecTest(unittest.TestCase):
                           "billing": "subscription"},
                 "local": provider(base_url="http://localhost:11434", env={"ANTHROPIC_AUTH_TOKEN": "ollama"},
                                   billing="local"),
+                "cli": {"kind": "cli", "models": {"flash": "x-flash", "pro": "x-pro"}, "timeout_s": 60,
+                        "billing": "subscription", "fail_re": "^Execution failed",
+                        "cmd": ["fake-cli", "-p", "{prompt}", "--model", "{model}",
+                                "--usage-output-file", "{run_dir}/{label}-usage.json"],
+                        "usage_file": "{run_dir}/{label}-usage.json",
+                        "usage": {"input_tokens": "tokenDetails.input.tokenCount",
+                                  "cache_read_input_tokens": "tokenDetails.cache_read.tokenCount",
+                                  "cache_creation_input_tokens": "tokenDetails.cache_write.tokenCount",
+                                  "output_tokens": "tokenDetails.output.tokenCount"}},
             },
         }
         self.save_config()
@@ -295,6 +327,66 @@ class CheapExecTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("codex", json.loads((self.state / "state.json").read_text())["cooldowns"])
 
+    # --- generic cli adapter ------------------------------------------------
+
+    def test_cli_executes_with_argv_prompt_and_usage_file(self):
+        self.config["chain"] = ["cli"]
+        self.save_config()
+        log_path = self.tmp / "args.log"
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_ARGS_LOG": str(log_path)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("cli: OK", r.stdout)
+        self.assertTrue((self.repo / "cli-was-here.txt").exists())
+        self.assertRegex(log_path.read_text(errors="replace"), r"cli model=x-flash prompt_len=[1-9]\d+")
+        ex = next(e for e in self.ledger() if e["role"] == "executor")
+        # cache writes count as input; the usage file is the only source of these numbers.
+        self.assertEqual((ex["input"], ex["cached"], ex["output"], ex["billing"]), (15710, 0, 5, "subscription"))
+
+    def test_cli_stdin_prompt_and_json_output(self):
+        self.config["chain"] = ["cli"]
+        self.config["providers"]["cli"].update(
+            cmd=["fake-cli", "--model", "{model}"], output="json", text_field="response", usage_file=None,
+            usage={"input_tokens": "stats.models.*.tokens.prompt", "cache_read_input_tokens": "stats.models.*.tokens.cached",
+                   "output_tokens": "stats.models.*.tokens.candidates"})
+        self.save_config()
+        log_path = self.tmp / "args.log"
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_CLI": "json", "FAKE_ARGS_LOG": str(log_path)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("cli: OK", r.stdout)
+        self.assertRegex(log_path.read_text(errors="replace"), r"prompt_len=[1-9]\d+")  # arrived through stdin
+        ex = next(e for e in self.ledger() if e["role"] == "executor")
+        self.assertEqual((ex["input"], ex["cached"], ex["output"]), (150, 40, 10))  # '*' sums both models
+
+    def test_cli_exit_zero_failure_is_detected(self):
+        self.config["chain"] = ["cli", "cheapapi"]
+        self.save_config()
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_CLI": "fail0"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("not supported", r.stdout + r.stderr)
+        self.assertIn("cheapapi: OK", r.stdout)
+        self.assertFalse((self.repo / "cli-was-here.txt").exists())
+
+    def test_cli_quota_sets_cooldown_and_auth_gives_hint(self):
+        self.config["chain"] = ["cli", "cheapapi"]
+        self.save_config()
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_CLI": "quota"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("cli", json.loads((self.state / "state.json").read_text())["cooldowns"])
+        self.run_cli("cooldown", "cli", "--clear")
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_CLI": "auth"})
+        self.assertIn("not logged in", r.stdout + r.stderr)
+        self.assertNotIn("cli", json.loads((self.state / "state.json").read_text()).get("cooldowns", {}))
+
+    def test_cli_cannot_verify_and_needs_cmd(self):
+        self.config["verify"] = {"provider": "cli", "tier": "pro"}
+        self.config["providers"]["cli"]["cmd"] = "fake-cli -p {prompt}"
+        self.config["providers"]["cli"]["fail_re"] = "("
+        self.save_config()
+        r = self.run_cli("run", "--plan", "PLAN.md")
+        self.assertEqual(r.returncode, ce.EXIT_CONFIG, r.stdout + r.stderr)
+        for needle in ("must be a 'claude' or 'codex'", "cmd must be a non-empty list", "not a valid regex"):
+            self.assertIn(needle, r.stdout + r.stderr)
+
     # --- cost ledger -------------------------------------------------------
 
     def test_ledger_costs_are_deterministic(self):
@@ -369,6 +461,11 @@ class CheapExecTest(unittest.TestCase):
         cfg = json.loads(json.dumps(ce.DEFAULT_CONFIG))
         cfg.update(json.loads(json.dumps(ce.EXAMPLE_CONFIG)))
         self.assertEqual(ce.validate_config(cfg), [])
+        presets = sorted((ROOT / "examples" / "providers").glob("*.json"))
+        self.assertTrue(presets)
+        for path in presets:  # untested against the real tools, but at least loadable and complete
+            cfg["providers"].update(json.loads(path.read_text()))
+        self.assertEqual(ce.validate_config(cfg), [], presets)
 
     def test_two_runs_same_outcome(self):
         outcomes = []

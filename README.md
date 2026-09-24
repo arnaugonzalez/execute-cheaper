@@ -8,7 +8,8 @@
 
 You already have a good plan, written by you or by a frontier model. Having that same model type
 out every line is the expensive part. execute-cheaper hands the plan to a headless coding agent: the
-CLI subscriptions you already pay for first (Codex, Antigravity, Claude Code), then any cheap API
+CLI subscriptions you already pay for first (Codex, GitHub Copilot, Antigravity, Claude Code, or any
+other coding CLI with a headless mode), then any cheap API
 you configure (OpenRouter, DeepSeek, GLM, a local model). It switches providers when one runs out
 of quota, and then has a **separate, read-only reviewer** check the git diff against the plan. The reviewer returns a typed verdict. If
 the verdict is not `ok`, its findings go back to the executor for a repair round.
@@ -20,8 +21,9 @@ the verdict is not `ok`, its findings go back to the executor for a repair round
 Requires Python 3.11+, git and at least one agent CLI. The default config tries, in order,
 [Codex CLI](https://github.com/openai/codex) (`codex login` with a ChatGPT account; the preset models work
 even on the Free plan. Paid plans unlock stronger models and the names change often: check yours
-with `codex` → `/model`), Antigravity `agy`,
-and [Claude Code](https://docs.claude.com/en/docs/claude-code) on [OpenRouter](https://openrouter.ai/keys)
+with `codex` → `/model`), [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli)
+(`copilot` once to sign in; works on the Student plan, where only `auto` model routing is available),
+Antigravity `agy`, and [Claude Code](https://docs.claude.com/en/docs/claude-code) on [OpenRouter](https://openrouter.ai/keys)
 with an API key. The verifier is Claude Code on your own Claude login. Providers you don't have are
 skipped; edit the chain to match what you use.
 
@@ -81,7 +83,7 @@ by `execute-cheaper init`. Keys go in `.env` in the same directory (mode 600) or
 
 ```jsonc
 {
-  "chain": ["codex", "agy", "openrouter"],         // executors, tried in order
+  "chain": ["codex", "copilot", "agy", "openrouter"],   // executors, tried in order
   "verify": {"provider": "claude-login", "tier": "pro"},
   "max_rounds": 2,
   "on_event": null,                                // shell command, gets each event as JSON on stdin
@@ -89,6 +91,16 @@ by `execute-cheaper init`. Keys go in `.env` in the same directory (mode 600) or
     "codex": {
       "kind": "codex",                             // `codex exec`, your own Codex login
       "models": {"flash": "gpt-5.6-luna", "pro": "gpt-5.6-terra"},
+      "billing": "subscription"
+    },
+    "copilot": {
+      "kind": "cli",                               // any headless coding CLI, described here
+      "cmd": ["copilot", "-p", "{prompt}", "--model", "{model}", "--yolo", "--no-ask-user", "-s",
+              "--usage-output-file", "{run_dir}/{label}-usage.json"],
+      "fail_re": "^Execution failed",              // Copilot exits 0 on some failures
+      "usage_file": "{run_dir}/{label}-usage.json",
+      "usage": {"input_tokens": "tokenDetails.input.tokenCount", "output_tokens": "tokenDetails.output.tokenCount"},
+      "models": {"flash": "auto", "pro": "auto"},  // paid plans can pin e.g. "claude-sonnet-4.5"
       "billing": "subscription"
     },
     "openrouter": {
@@ -104,15 +116,17 @@ by `execute-cheaper init`. Keys go in `.env` in the same directory (mode 600) or
 }
 ```
 
-Presets in the generated config: `codex`, `agy`, `openrouter`, `deepseek` (with its off-peak/peak pricing),
-`zai` (GLM), `anthropic` (API key), `claude-login` (your own Claude Code subscription login) and
-`ollama` (local; also works with LM Studio, vLLM, llama.cpp or a LiteLLM proxy, since they all expose
-the Anthropic Messages API). Prices are dated (`prices_as_of`) and will go stale: check the
-provider's page.
+Presets in the generated config: `codex`, `copilot`, `agy`, `openrouter`, `deepseek` (with its off-peak/peak
+pricing), `zai` (GLM; on the GLM Coding Plan set `"billing": "subscription"`), `anthropic` (API key),
+`claude-login` (your own Claude Code subscription login) and `ollama` (local; also works with LM Studio,
+vLLM, llama.cpp or a LiteLLM proxy, since they all expose the Anthropic Messages API). Prices are dated
+(`prices_as_of`) and will go stale: check the provider's page. More presets, **not tested by the
+author**, live in [`examples/providers/`](examples/providers/) (Gemini CLI, Cursor's `cursor-agent`,
+opencode).
 
 | Field | Meaning |
 |---|---|
-| `kind` | `claude` (Claude Code `claude -p`), `codex` (Codex CLI `codex exec`) or `agy` (Google Antigravity CLI). The verifier must be `claude` or `codex` (both enforce a JSON Schema) |
+| `kind` | `claude` (Claude Code `claude -p`), `codex` (Codex CLI `codex exec`), `agy` (Google Antigravity CLI) or `cli` (any other headless coding CLI, see below). The verifier must be `claude` or `codex` (both enforce a JSON Schema) |
 | `base_url` / `key_env` | Endpoint and the environment variable that holds its key. No `base_url` means Anthropic itself |
 | `use_login` | Use your own Claude Code login instead of a key (subscription usage) |
 | `env` | Extra environment variables for that provider; `$KEY` is replaced by the key |
@@ -120,6 +134,15 @@ provider's page.
 | `timeout_s`, `max_budget_usd` | Per-attempt limits |
 | `sandbox` | `codex` only: `on` (default, Codex's sandbox) or `none` |
 | `peak` | Optional price multiplier by UTC hour window |
+| `cmd` | `cli` only: argv with `{prompt}`, `{model}`, `{run_dir}` and `{label}` placeholders. Without `{prompt}` the prompt goes to stdin (use that for CLIs that read it: argv entries are capped at 128 KiB on Linux) |
+| `output`, `text_field` | `cli` only: `text` (default; stdout is the executor's report) or `json` (stdout is a JSON document or JSON lines; `text_field` is the dotted path of the report inside it) |
+| `usage`, `usage_file` | `cli` only: `{"input_tokens": "dotted.path", ...}` read from that JSON, or from `usage_file` when the CLI writes one. `*` in a path sums every key (per-model stats) |
+| `fail_re`, `quota_re`, `auth_re` | `cli` only: regexes over stdout+stderr. `fail_re` marks failures that still exit 0; the other two turn a failure into a cooldown or a "sign in" hint (defaults cover the usual wording) |
+
+Adding a CLI is config, not code: describe its headless invocation with `kind: "cli"` and it becomes
+an executor with the same fallback, cooldowns and ledger as the built-in ones. It cannot be the
+verifier, because the verdict needs a JSON Schema the CLI would have to enforce. Anything that runs
+under `cmd` runs with that CLI's permission prompts off, like every executor here.
 
 `--tier`, `--chain a,b`, `--verify <provider>|none`, `--max-rounds` and `--on-event` override the
 config per run. Other commands: `usage --days 7 [--json]`, `verify --run <id>` (retry only the
@@ -137,6 +160,7 @@ For the first two rows the OpenRouter balance moved $0.2551, against $0.2639 est
 | Sonnet 5 executes, no verification | $0.1389 · 185k tokens · 22 s | — | **$0.139** |
 | DeepSeek executes, Sonnet verifies on a Claude subscription (`--verify claude-login`, `verified OK`) | $0.0033 · 70k tokens · 6 s | subscription (Claude Code prices it at $0.137) | **$0.003 paid** |
 | Codex `gpt-5.6-luna` executes, Codex `gpt-5.6-terra` verifies, **ChatGPT Free plan** (`--chain codex --verify codex`, `verified OK`) | free plan · 114k tokens · 40 s | free plan · 73k tokens | **$0** |
+| GitHub Copilot CLI (`auto`, **Student plan**) executes, Sonnet verifies on a Claude subscription (`--chain copilot`, `verified OK`) | student plan · 77k tokens · 24 s | subscription (Claude Code prices it at $0.175) | **$0 paid** |
 
 On a plan this small the verifier dominates the bill, so verifying on a subscription you already
 pay for is where the saving is. The Free-plan row costs nothing but has tight usage limits; it
@@ -160,15 +184,19 @@ stops a run. [`examples/hooks/`](examples/hooks/) has desktop notifications, [ap
   them for `bwrap` or set `"sandbox": "none"` on the provider (then it runs unsandboxed, like the
   `claude` executor; the verifier stays read-only only by instruction).
 - The target directory must be a git repository, because the verifier reviews `git diff`.
-- Subscription CLIs (`codex`, `agy`, `claude-login`) spend your plan's limits and are bound by each
-  vendor's terms; Google's Antigravity terms in particular restrict use with third-party tools.
-  Read them before you script it. For CI, use API keys.
+- Subscription CLIs (`codex`, `copilot`, `agy`, `claude-login`) spend your plan's limits and are bound
+  by each vendor's terms; Google's Antigravity terms in particular restrict use with third-party
+  tools. Read them before you script it. For CI, use API keys.
+- Free and student plans restrict models: ChatGPT Free exposes two Codex models, Copilot Student
+  only `auto` routing, and Gemini CLI no longer accepts personal Google accounts at all (Google
+  points them to Antigravity, so the Google path here is `agy` or a Gemini API key).
 - Linux and macOS. Windows is untested.
 
 ## Roadmap
 
 - Generic hang watchdog for the `claude` adapter (it currently gets a timeout only).
-- An opencode adapter, for endpoints that only speak the OpenAI API.
+- Real runs behind the `examples/providers/` presets (Gemini CLI with an API key, `cursor-agent`,
+  opencode). Reports of what works, and with which flags, are welcome as issues.
 - Optional pre-verification checks (`lint`/`test` commands) that run before the verifier.
 
 ## License

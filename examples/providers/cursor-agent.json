@@ -1,0 +1,9 @@
+{
+  "cursor": {
+    "kind": "cli",
+    "cmd": ["cursor-agent", "-p", "{prompt}", "--model", "{model}", "--output-format", "text", "--force"],
+    "models": {"flash": "auto", "pro": "auto"},
+    "timeout_s": 3600,
+    "billing": "subscription"
+  }
+}
