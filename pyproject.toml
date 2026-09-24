@@ -3,7 +3,7 @@ requires = ["hatchling>=1.24"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cheap-exec"
+name = "execute-cheaper"
 version = "0.1.0"
 description = "Plan with an expensive model, execute with cheap ones, verify independently."
 readme = "README.md"
@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Arnau González" }]
-keywords = ["llm", "coding-agent", "claude-code", "deepseek", "openrouter", "verification", "cost"]
+keywords = ["llm", "coding-agent", "claude-code", "codex", "deepseek", "openrouter", "verification", "cost"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -24,13 +24,13 @@ classifiers = [
 dependencies = []
 
 [project.scripts]
-cheap-exec = "cheap_exec:main"
+execute-cheaper = "execute_cheaper:main"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["cheap_exec.py"]
+only-include = ["execute_cheaper.py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["cheap_exec.py", "config.example.json", "tests/", "examples/", "README.md", "CHANGELOG.md", "LICENSE"]
+include = ["execute_cheaper.py", "config.example.json", "tests/", "examples/", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [tool.ruff]
 line-length = 130

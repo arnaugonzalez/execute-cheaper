@@ -16,8 +16,8 @@
     "codex": {
       "kind": "codex",
       "models": {
-        "flash": "gpt-5.4-mini",
-        "pro": "gpt-5.4"
+        "flash": "gpt-5.6-luna",
+        "pro": "gpt-5.6-terra"
       },
       "timeout_s": 3600,
       "billing": "subscription"

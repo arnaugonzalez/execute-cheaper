@@ -1,36 +1,37 @@
-# cheap-exec
+# execute-cheaper
 
 **Plan with the expensive model. Execute with the cheap ones. Verify independently.**
 
-[![CI](https://github.com/arnaugonzalez/cheap-exec/actions/workflows/ci.yml/badge.svg)](https://github.com/arnaugonzalez/cheap-exec/actions/workflows/ci.yml)
+[![CI](https://github.com/arnaugonzalez/execute-cheaper/actions/workflows/ci.yml/badge.svg)](https://github.com/arnaugonzalez/execute-cheaper/actions/workflows/ci.yml)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 
 You already have a good plan, written by you or by a frontier model. Having that same model type
-out every line is the expensive part. cheap-exec hands the plan to a headless coding agent: the
+out every line is the expensive part. execute-cheaper hands the plan to a headless coding agent: the
 CLI subscriptions you already pay for first (Codex, Antigravity, Claude Code), then any cheap API
 you configure (OpenRouter, DeepSeek, GLM, a local model). It switches providers when one runs out
 of quota, and then has a **separate, read-only reviewer** check the git diff against the plan. The reviewer returns a typed verdict. If
 the verdict is not `ok`, its findings go back to the executor for a repair round.
 
-<!-- demo GIF (≤20 s): cheap-exec run → provider fallback → verdict → report.md -->
+<!-- demo GIF (≤20 s): execute-cheaper run → provider fallback → verdict → report.md -->
 
 ## Quickstart
 
 Requires Python 3.11+, git and at least one agent CLI. The default config tries, in order,
-[Codex CLI](https://github.com/openai/codex) (`codex login` with a ChatGPT plan), Antigravity `agy`,
+[Codex CLI](https://github.com/openai/codex) (`codex login` with a ChatGPT plan; model names available
+to your plan change often, check them with `codex` → `/model`), Antigravity `agy`,
 and [Claude Code](https://docs.claude.com/en/docs/claude-code) on [OpenRouter](https://openrouter.ai/keys)
 with an API key. The verifier is Claude Code on your own Claude login. Providers you don't have are
 skipped; edit the chain to match what you use.
 
 ```bash
-pipx install cheap-exec            # or: uv tool install cheap-exec
-cheap-exec init                    # writes ~/.config/cheap-exec/config.json and .env
-echo "OPENROUTER_API_KEY=sk-or-..." >> ~/.config/cheap-exec/.env   # optional API fallback
-cheap-exec run --plan PLAN.md --cwd path/to/repo
+pipx install execute-cheaper            # or: uv tool install execute-cheaper
+execute-cheaper init                    # writes ~/.config/execute-cheaper/config.json and .env
+echo "OPENROUTER_API_KEY=sk-or-..." >> ~/.config/execute-cheaper/.env   # optional API fallback
+execute-cheaper run --plan PLAN.md --cwd path/to/repo
 ```
 
-`cheap-exec status` shows which providers are ready (binary found, logged in or key present) and
+`execute-cheaper status` shows which providers are ready (binary found, logged in or key present) and
 which are cooling down. Plans are plain Markdown; see [`examples/plans/`](examples/plans/).
 
 ## What a run looks like
@@ -60,11 +61,11 @@ flowchart LR
 
 ## Why this and not…
 
-Each piece exists elsewhere. What cheap-exec adds is the loop around them: the plan is the
+Each piece exists elsewhere. What execute-cheaper adds is the loop around them: the plan is the
 contract, a verifier in a separate process checks the diff against it, and every run leaves an
 auditable cost record.
 
-| | Better at | cheap-exec differs by |
+| | Better at | execute-cheaper differs by |
 |---|---|---|
 | **Aider** architect/editor | Built-in two-model workflow, repo map, auto lint/test | Wrapping any agent CLI, an independent verifier process, provider fallback with cooldowns |
 | **LiteLLM** router / proxy | Production-grade fallbacks, retries, budgets, cost tracking at the HTTP layer | Knowing what a plan and a diff are. The two combine: point a provider's `base_url` at your LiteLLM proxy |
@@ -74,8 +75,8 @@ auditable cost record.
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/cheap-exec/config.json` (default `~/.config/cheap-exec/config.json`), created
-by `cheap-exec init`. Keys go in `.env` in the same directory (mode 600) or in the environment.
+`$XDG_CONFIG_HOME/execute-cheaper/config.json` (default `~/.config/execute-cheaper/config.json`), created
+by `execute-cheaper init`. Keys go in `.env` in the same directory (mode 600) or in the environment.
 
 ```jsonc
 {
@@ -86,7 +87,7 @@ by `cheap-exec init`. Keys go in `.env` in the same directory (mode 600) or in t
   "providers": {
     "codex": {
       "kind": "codex",                             // `codex exec`, your own Codex login
-      "models": {"flash": "gpt-5.4-mini", "pro": "gpt-5.4"},
+      "models": {"flash": "gpt-5.6-luna", "pro": "gpt-5.6-terra"},
       "billing": "subscription"
     },
     "openrouter": {
@@ -116,6 +117,7 @@ provider's page.
 | `env` | Extra environment variables for that provider; `$KEY` is replaced by the key |
 | `models.flash` / `models.pro` | Chosen with `--tier flash|pro` |
 | `timeout_s`, `max_budget_usd` | Per-attempt limits |
+| `sandbox` | `codex` only: `on` (default, Codex's sandbox) or `none` |
 | `peak` | Optional price multiplier by UTC hour window |
 
 `--tier`, `--chain a,b`, `--verify <provider>|none`, `--max-rounds` and `--on-event` override the
@@ -125,7 +127,7 @@ verification), `cooldown <provider> [--minutes N | --clear]`.
 ## Measured cost
 
 One run of [`examples/plans/add-healthcheck.md`](examples/plans/add-healthcheck.md) on a small FastAPI
-repo, 2026-09-24. Figures come from each run's `report.md` (`cheap-exec usage --days 1` sums them).
+repo, 2026-09-24. Figures come from each run's `report.md` (`execute-cheaper usage --days 1` sums them).
 For the first two rows the OpenRouter balance moved $0.2551, against $0.2639 estimated.
 
 | Setup | Executor | Verifier | Total |
@@ -133,6 +135,7 @@ For the first two rows the OpenRouter balance moved $0.2551, against $0.2639 est
 | DeepSeek V4.1 Flash executes, Sonnet 5 verifies (`verified OK`, 1 round) | $0.0031 · 70k tokens · 23 s | $0.1219 · 142k tokens | **$0.125** |
 | Sonnet 5 executes, no verification | $0.1389 · 185k tokens · 22 s | — | **$0.139** |
 | DeepSeek executes, Sonnet verifies on a Claude subscription (`--verify claude-login`, `verified OK`) | $0.0033 · 70k tokens · 6 s | subscription (Claude Code prices it at $0.137) | **$0.003 paid** |
+| Codex `gpt-5.6-luna` executes, Codex `gpt-5.6-terra` verifies, ChatGPT plan (`--chain codex --verify codex`, `verified OK`) | subscription · 114k tokens · 40 s | subscription · 73k tokens | **$0 paid** |
 
 On a plan this small the verifier dominates the bill, so verifying on a subscription you already
 pay for is where the saving is. The cheaper executor matters more as plans grow.
@@ -150,6 +153,10 @@ stops a run. [`examples/hooks/`](examples/hooks/) has desktop notifications, [ap
   [SECURITY.md](SECURITY.md).
 - The verifier is a model too: it catches missing tasks and scope creep well, but it is not a test
   suite. Put real checks in your plan and it will run them.
+- Codex's own sandbox needs unprivileged user namespaces. On Ubuntu 24.04+ AppArmor blocks them
+  and every edit fails; execute-cheaper reports that instead of accepting an empty run. Either allow
+  them for `bwrap` or set `"sandbox": "none"` on the provider (then it runs unsandboxed, like the
+  `claude` executor; the verifier stays read-only only by instruction).
 - The target directory must be a git repository, because the verifier reviews `git diff`.
 - Subscription CLIs (`codex`, `agy`, `claude-login`) spend your plan's limits and are bound by each
   vendor's terms; Google's Antigravity terms in particular restrict use with third-party tools.

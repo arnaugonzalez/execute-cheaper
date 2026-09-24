@@ -18,9 +18,9 @@ jobs:
       - name: Configure git identity for test repos
         run: git config --global user.email ci@example.com && git config --global user.name ci
       - run: pipx run ruff check .
-      - run: python -m unittest -v tests.test_cheap_exec
+      - run: python -m unittest -v tests.test_execute_cheaper
       - name: Smoke test the installed CLI
         run: |
           pip install .
-          cheap-exec --version
-          cheap-exec --help > /dev/null
+          execute-cheaper --version
+          execute-cheaper --help > /dev/null

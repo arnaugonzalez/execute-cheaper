@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""cheap-exec: plan with an expensive model, execute with cheap ones, verify independently.
+"""execute-cheaper: plan with an expensive model, execute with cheap ones, verify independently.
 
-A planner (you, or a frontier model) writes a Markdown plan. cheap-exec hands it to a headless
+A planner (you, or a frontier model) writes a Markdown plan. execute-cheaper hands it to a headless
 coding agent running on the cheapest available provider, falls back along a provider chain when
 one is out of quota, then asks a separate read-only verifier to check the git diff against the
 plan and return a typed verdict. Failed verification triggers a repair round.
@@ -11,7 +11,7 @@ Executors and the verifier are coding-agent CLIs:
                  (Anthropic, DeepSeek, Z.ai, OpenRouter, a local proxy...) or at your own login.
   kind "agy":    Google Antigravity CLI (optional; check its terms before scripting it).
 
-Standard library only. Config in $XDG_CONFIG_HOME/cheap-exec, state in $XDG_STATE_HOME/cheap-exec.
+Standard library only. Config in $XDG_CONFIG_HOME/execute-cheaper, state in $XDG_STATE_HOME/execute-cheaper.
 """
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ def _xdg(var: str, fallback: Path) -> Path:
     return Path(os.environ.get(var) or fallback)
 
 
-CONFIG_DIR = Path(os.environ.get("CHEAP_EXEC_CONFIG") or _xdg("XDG_CONFIG_HOME", HOME / ".config") / "cheap-exec")
-STATE_DIR = Path(os.environ.get("CHEAP_EXEC_STATE") or _xdg("XDG_STATE_HOME", HOME / ".local" / "state") / "cheap-exec")
+CONFIG_DIR = Path(os.environ.get("EXECUTE_CHEAPER_CONFIG") or _xdg("XDG_CONFIG_HOME", HOME / ".config") / "execute-cheaper")
+STATE_DIR = Path(os.environ.get("EXECUTE_CHEAPER_STATE") or _xdg("XDG_STATE_HOME", HOME / ".local" / "state") / "execute-cheaper")
 CONFIG_PATH = CONFIG_DIR / "config.json"
 ENV_PATH = CONFIG_DIR / ".env"
 STATE_PATH = STATE_DIR / "state.json"
@@ -56,7 +56,7 @@ DEFAULT_CONFIG: dict = {
     "providers": {},
 }
 
-# Written by `cheap-exec init` and kept in sync with config.example.json (a test checks it).
+# Written by `execute-cheaper init` and kept in sync with config.example.json (a test checks it).
 # Prices: USD per 1M tokens [input, cached input, output(, cache write)], as listed by each provider on prices_as_of.
 # Cache writes default to the input price; Anthropic models charge 1.25x input for them.
 EXAMPLE_CONFIG: dict = {
@@ -68,7 +68,7 @@ EXAMPLE_CONFIG: dict = {
     "providers": {
         "codex": {
             "kind": "codex",
-            "models": {"flash": "gpt-5.4-mini", "pro": "gpt-5.4"},
+            "models": {"flash": "gpt-5.6-luna", "pro": "gpt-5.6-terra"},
             "timeout_s": 3600,
             "billing": "subscription",
         },
@@ -201,7 +201,7 @@ def validate_config(cfg: dict) -> list[str]:
     errs = []
     providers = cfg.get("providers") or {}
     if not cfg.get("chain"):
-        errs.append(f"'chain' is empty: list at least one provider in {CONFIG_PATH} (run `cheap-exec init`)")
+        errs.append(f"'chain' is empty: list at least one provider in {CONFIG_PATH} (run `execute-cheaper init`)")
     for name in cfg.get("chain") or []:
         if name not in providers:
             errs.append(f"chain: unknown provider '{name}' (defined: {', '.join(providers) or 'none'})")
@@ -396,7 +396,7 @@ Report strictly in the JSON schema you were given:
 - summary: ≤ 3 sentences.
 """
 
-EXECUTOR_PROFILE_CLAUDE_MD = """# cheap-exec executor profile
+EXECUTOR_PROFILE_CLAUDE_MD = """# execute-cheaper executor profile
 You execute plans. The plan you receive is the contract: implement it as written, do not redesign,
 do not touch files the plan does not name, do not commit or push unless the plan says so.
 Answer in the report format the prompt asks for (≤ 25 lines). Never read or write other agents'
@@ -583,11 +583,15 @@ def run_claude(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str,
 def run_codex(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, pcfg: dict, timeout_s: int,
               read_only: bool = False, json_schema: dict | None = None) -> dict:
     """`codex exec --json`: uses the user's own Codex login (ChatGPT plan) or whatever Codex is set up with.
-    The prompt goes through stdin, so large diffs don't hit the argv size limit."""
+    The prompt goes through stdin, so large diffs don't hit the argv size limit.
+    pcfg "sandbox": "on" (default: Codex's own sandbox) or "none", for hosts where it can't start."""
     last = run_dir / f"{label}-last.txt"
+    if pcfg.get("sandbox", "on") == "none":
+        sandbox = ["--dangerously-bypass-approvals-and-sandbox"]
+    else:
+        sandbox = ["--sandbox", "read-only" if read_only else "workspace-write"]
     cmd = [pcfg.get("bin", "codex"), "exec", "--json", "--ephemeral", "--skip-git-repo-check",
-           "--ignore-user-config", "--ignore-rules", "-m", model, "-o", str(last),
-           "--sandbox", "read-only" if read_only else "workspace-write", *pcfg.get("args", [])]
+           "--ignore-user-config", "--ignore-rules", "-m", model, "-o", str(last), *sandbox, *pcfg.get("args", [])]
     if json_schema:
         schema_path = run_dir / f"{label}-schema.json"
         schema_path.write_text(json.dumps(json_schema), encoding="utf-8")
@@ -605,6 +609,7 @@ def run_codex(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, 
     if proc.stderr:
         (run_dir / f"{label}-stderr.txt").write_text(proc.stderr, encoding="utf-8")
     text, error, completed = "", None, False
+    edits = {"completed": 0, "failed": 0}
     usage = {"input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0}
     for line in (proc.stdout or "").splitlines():
         try:
@@ -614,6 +619,8 @@ def run_codex(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, 
         kind, item = ev.get("type"), ev.get("item") or {}
         if kind == "item.completed" and item.get("type") == "agent_message":
             text = item.get("text", "")
+        elif kind == "item.completed" and item.get("type") == "file_change":
+            edits["failed" if item.get("status") == "failed" else "completed"] += 1
         elif kind == "turn.completed":
             completed = True
             u = ev.get("usage") or {}
@@ -636,6 +643,10 @@ def run_codex(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, 
         if CODEX_QUOTA_RE.search(msg):
             return {"ok": False, "text": "", "reason": "quota", "reset_s": 3600}
         return {"ok": False, "text": text, "reason": f"exit {proc.returncode}: {msg[:300]}", "usage": usage}
+    if edits["failed"] and not edits["completed"]:
+        return {"ok": False, "text": text, "usage": usage,
+                "reason": "codex sandbox rejected every file edit (on Ubuntu, AppArmor blocks the user namespaces "
+                          "it needs): fix the host or set \"sandbox\": \"none\" for this provider"}
     structured = None
     if json_schema:
         try:
@@ -738,7 +749,7 @@ def execute_chain(prompt: str, cwd: Path, run_dir: Path, tier: str, cfg: dict, s
 
 
 def write_report(run_dir: Path, summary: dict) -> Path:
-    lines = [f"# cheap-exec — {summary['run_id']}", "",
+    lines = [f"# execute-cheaper — {summary['run_id']}", "",
              f"- cwd: {summary['cwd']} · tier: {summary['tier']}",
              f"- plan: {summary['plan']}", f"- result: **{summary['status']}**", ""]
     for r in summary["rounds"]:
@@ -794,7 +805,7 @@ def run_costs(run_id: str) -> dict:
 
 def cmd_run(args: argparse.Namespace) -> int:
     if not CONFIG_PATH.exists():
-        raise ConfigError(f"no config at {CONFIG_PATH}: run `cheap-exec init` first")
+        raise ConfigError(f"no config at {CONFIG_PATH}: run `execute-cheaper init` first")
     cfg = load_config()
     if args.chain:
         cfg["chain"] = [c.strip() for c in args.chain.split(",") if c.strip()]
@@ -901,7 +912,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     cfg = load_config()
     run_dir = RUNS_DIR / args.run
     if not (run_dir / "run.json").exists():
-        raise ConfigError(f"no such run: {args.run} (see `cheap-exec status`)")
+        raise ConfigError(f"no such run: {args.run} (see `execute-cheaper status`)")
     if not cfg["verify"].get("provider"):
         raise ConfigError("no verifier configured: set verify.provider in config")
     errs = validate_config(cfg)
@@ -922,7 +933,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def cmd_status(_: argparse.Namespace) -> int:
     cfg = load_config()
     secrets = load_env()
-    print(f"config: {CONFIG_PATH} ({'found' if CONFIG_PATH.exists() else 'missing — run `cheap-exec init`'})")
+    print(f"config: {CONFIG_PATH} ({'found' if CONFIG_PATH.exists() else 'missing — run `execute-cheaper init`'})")
     print(f"keys:   {ENV_PATH} ({'found' if ENV_PATH.exists() else 'missing'}) + environment")
     print(f"state:  {STATE_DIR}")
     print(f"chain: {cfg['chain']} · verifier: {cfg['verify'].get('provider') or 'none'} · rounds: {cfg['max_rounds']}")
@@ -968,7 +979,7 @@ def usage_summary(days: int) -> tuple[str, dict]:
         a["output"] += e.get("output", 0)
         a["cost"] += e.get("cost_usd") or 0.0
         a["runs"].add(e.get("run_id"))
-    lines = [f"cheap-exec · last {days} days · {len({e.get('run_id') for e in rows})} runs"]
+    lines = [f"execute-cheaper · last {days} days · {len({e.get('run_id') for e in rows})} runs"]
     paid = 0.0
     for prov, a in sorted(agg.items()):
         unit = "subscription-equivalent" if a["billing"] == "subscription" else "paid"
@@ -1008,7 +1019,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"wrote {CONFIG_PATH}")
     if not ENV_PATH.exists():
         keys = sorted({p["key_env"] for p in EXAMPLE_CONFIG["providers"].values() if p.get("key_env")})
-        ENV_PATH.write_text("# API keys for cheap-exec providers (KEY=value, no export).\n"
+        ENV_PATH.write_text("# API keys for execute-cheaper providers (KEY=value, no export).\n"
                             + "".join(f"{k}=\n" for k in keys), encoding="utf-8")
         print(f"wrote {ENV_PATH} — fill in the key(s) for the providers in your chain")
     ENV_PATH.chmod(0o600)
@@ -1026,8 +1037,8 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="cheap-exec", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--version", action="version", version=f"cheap-exec {__version__}")
+    p = argparse.ArgumentParser(prog="execute-cheaper", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"execute-cheaper {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("init", help="create config, .env template and the executor profile")
     i.add_argument("--force", action="store_true", help="overwrite an existing config.json")
@@ -1064,7 +1075,7 @@ def main() -> None:
     try:
         sys.exit(args.func(args))
     except ConfigError as e:
-        print(f"cheap-exec: {e}", file=sys.stderr)
+        print(f"execute-cheaper: {e}", file=sys.stderr)
         sys.exit(EXIT_CONFIG)
 
 

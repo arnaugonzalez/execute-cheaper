@@ -6,4 +6,4 @@ event=$(cat)
 kind=$(printf '%s' "$event" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event"])')
 [ "$kind" = run_end ] || exit 0
 body=$(printf '%s' "$event" | python3 -c 'import json,sys; e=json.load(sys.stdin); print(e["status"]); print(e["report"])')
-apprise -t "cheap-exec" -b "$body" ${APPRISE_URLS}
+apprise -t "execute-cheaper" -b "$body" ${APPRISE_URLS}

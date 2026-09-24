@@ -1,4 +1,4 @@
-"""cheap-exec tests with fake `agy`, `claude` and `codex` binaries: no network, no keys, no quota spent."""
+"""execute-cheaper tests with fake `agy`, `claude` and `codex` binaries: no network, no keys, no quota spent."""
 import json
 import os
 import shutil
@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "cheap_exec.py"
+SCRIPT = ROOT / "execute_cheaper.py"
 sys.path.insert(0, str(ROOT))
-import cheap_exec as ce  # noqa: E402
+import execute_cheaper as ce  # noqa: E402
 
 FAKE_AGY_QUOTA_HANG = textwrap.dedent(r'''
     #!/usr/bin/env bash
@@ -60,7 +60,8 @@ FAKE_CODEX = textwrap.dedent(r"""
     #!/usr/bin/env bash
     schema=""; last=""; sandbox=""
     while [ $# -gt 0 ]; do
-      case "$1" in --output-schema) schema="$2";; -o) last="$2";; --sandbox) sandbox="$2";; esac; shift
+      case "$1" in --output-schema) schema="$2";; -o) last="$2";; --sandbox) sandbox="$2";;
+        --dangerously-bypass-approvals-and-sandbox) sandbox=none;; esac; shift
     done
     cat > /dev/null
     [ -n "${FAKE_ARGS_LOG:-}" ] && echo "codex sandbox=$sandbox schema=${schema:+yes}" >> "$FAKE_ARGS_LOG"
@@ -69,6 +70,12 @@ FAKE_CODEX = textwrap.dedent(r"""
       auth) echo '{"type":"turn.failed","error":{"message":"Your access token could not be refreshed. Please log out and sign in again."}}'; exit 1;;
       quota) echo '{"type":"turn.failed","error":{"message":"You have hit your usage limit. Try again in 2 hours."}}'; exit 1;;
     esac
+    if [ "${FAKE_CODEX:-ok}" = "sandboxfail" ] && [ "$sandbox" != none ] && [ -z "$schema" ]; then
+      echo '{"type":"item.completed","item":{"id":"f","type":"file_change","status":"failed","changes":[]}}'
+      printf 'Files changed: none, sandbox rejected writes.' > "$last"
+      echo '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5}}'
+      exit 0
+    fi
     if [ -n "$schema" ]; then
       msg='{"verdict":"ok","missing":[],"out_of_scope":[],"regressions":[],"checks_run":[],"summary":"fine"}'
     else
@@ -90,14 +97,14 @@ def provider(**kw):
 
 class CheapExecTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="cheap-exec-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="execute-cheaper-"))
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         self.xdg_cfg = self.tmp / "xdg-config"
         self.xdg_state = self.tmp / "xdg-state"
-        self.cfg = self.xdg_cfg / "cheap-exec"
+        self.cfg = self.xdg_cfg / "execute-cheaper"
         self.cfg.mkdir(parents=True)
-        self.state = self.xdg_state / "cheap-exec"
+        self.state = self.xdg_state / "execute-cheaper"
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
@@ -124,7 +131,7 @@ class CheapExecTest(unittest.TestCase):
         }
         self.save_config()
         (self.cfg / ".env").write_text("CHEAP_KEY=sk-test\n")
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith(("CHEAP_EXEC_", "ANTHROPIC_"))}
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith(("EXECUTE_CHEAPER_", "ANTHROPIC_"))}
         self.env.update(PATH=f"{self.bin}:{os.environ['PATH']}", XDG_CONFIG_HOME=str(self.xdg_cfg),
                         XDG_STATE_HOME=str(self.xdg_state))
 
@@ -252,6 +259,24 @@ class CheapExecTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("codex/c-pro", r.stdout)
         self.assertNotIn("judge-only-model", log_path.read_text(errors="replace"))
+
+    def test_codex_sandbox_failure_is_not_success(self):
+        self.config["chain"] = ["codex", "cheapapi"]
+        self.save_config()
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_CODEX": "sandboxfail"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("sandbox rejected every file edit", r.stdout)
+        self.assertIn("cheapapi: OK", r.stdout)
+
+    def test_codex_sandbox_none_bypasses(self):
+        self.config["chain"] = ["codex"]
+        self.config["providers"]["codex"]["sandbox"] = "none"
+        self.save_config()
+        log_path = self.tmp / "args.log"
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_CODEX": "sandboxfail", "FAKE_ARGS_LOG": str(log_path)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.repo / "codex-was-here.txt").exists())
+        self.assertIn("codex sandbox=none", log_path.read_text(errors="replace"))
 
     def test_codex_expired_login_falls_back_with_hint(self):
         self.config["chain"] = ["codex", "cheapapi"]
