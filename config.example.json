@@ -1,0 +1,165 @@
+{
+  "chain": [
+    "codex",
+    "agy",
+    "openrouter"
+  ],
+  "verify": {
+    "provider": "claude-login",
+    "tier": "pro",
+    "timeout_s": 1800
+  },
+  "max_rounds": 2,
+  "on_event": null,
+  "prices_as_of": "2026-09-24",
+  "providers": {
+    "codex": {
+      "kind": "codex",
+      "models": {
+        "flash": "gpt-5.4-mini",
+        "pro": "gpt-5.4"
+      },
+      "timeout_s": 3600,
+      "billing": "subscription"
+    },
+    "agy": {
+      "kind": "agy",
+      "models": {
+        "flash": "gemini-3.8-flash-high",
+        "pro": "gemini-3.1-pro-high"
+      },
+      "timeout_s": 3600,
+      "inactivity_s": 600,
+      "quota_hits_to_abort": 2,
+      "billing": "subscription"
+    },
+    "openrouter": {
+      "kind": "claude",
+      "base_url": "https://openrouter.ai/api",
+      "key_env": "OPENROUTER_API_KEY",
+      "env": {
+        "ANTHROPIC_API_KEY": "$KEY"
+      },
+      "models": {
+        "flash": "deepseek/deepseek-v4.1-flash",
+        "pro": "z-ai/glm-5.3"
+      },
+      "max_budget_usd": 2.0,
+      "timeout_s": 3600,
+      "billing": "paid",
+      "prices": {
+        "deepseek/deepseek-v4.1-flash": [
+          0.14,
+          0.0042,
+          0.42
+        ],
+        "z-ai/glm-5.3": [
+          1.4,
+          0.26,
+          4.4
+        ],
+        "anthropic/claude-sonnet-5": [
+          2.0,
+          0.2,
+          10.0,
+          2.5
+        ]
+      }
+    },
+    "deepseek": {
+      "kind": "claude",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "key_env": "DEEPSEEK_API_KEY",
+      "models": {
+        "flash": "deepseek-flash",
+        "pro": "deepseek-v4-pro"
+      },
+      "max_budget_usd": 2.0,
+      "timeout_s": 3600,
+      "billing": "paid",
+      "prices": {
+        "deepseek-flash": [
+          0.15,
+          0.003,
+          0.6
+        ],
+        "deepseek-v4-pro": [
+          0.66,
+          0.022,
+          1.98
+        ]
+      },
+      "peak": {
+        "multiplier": 2.0,
+        "utc_hours": [
+          [
+            1,
+            4
+          ],
+          [
+            6,
+            10
+          ]
+        ],
+        "weekdays_only": true
+      }
+    },
+    "zai": {
+      "kind": "claude",
+      "base_url": "https://api.z.ai/api/anthropic",
+      "key_env": "ZAI_API_KEY",
+      "models": {
+        "flash": "glm-5.3-flash",
+        "pro": "glm-5.3"
+      },
+      "max_budget_usd": 2.0,
+      "timeout_s": 3600,
+      "billing": "paid",
+      "prices": {
+        "glm-5.3-flash": [
+          0.15,
+          0.03,
+          0.5
+        ],
+        "glm-5.3": [
+          1.4,
+          0.26,
+          4.4
+        ]
+      }
+    },
+    "anthropic": {
+      "kind": "claude",
+      "key_env": "ANTHROPIC_API_KEY",
+      "models": {
+        "flash": "haiku",
+        "pro": "sonnet"
+      },
+      "timeout_s": 3600,
+      "billing": "paid"
+    },
+    "claude-login": {
+      "kind": "claude",
+      "use_login": true,
+      "models": {
+        "flash": "haiku",
+        "pro": "sonnet"
+      },
+      "timeout_s": 3600,
+      "billing": "subscription"
+    },
+    "ollama": {
+      "kind": "claude",
+      "base_url": "http://localhost:11434",
+      "env": {
+        "ANTHROPIC_AUTH_TOKEN": "ollama"
+      },
+      "models": {
+        "flash": "qwen3-coder",
+        "pro": "qwen3-coder"
+      },
+      "timeout_s": 3600,
+      "billing": "local"
+    }
+  }
+}

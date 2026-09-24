@@ -1,0 +1,26 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Configure git identity for test repos
+        run: git config --global user.email ci@example.com && git config --global user.name ci
+      - run: pipx run ruff check .
+      - run: python -m unittest -v tests.test_cheap_exec
+      - name: Smoke test the installed CLI
+        run: |
+          pip install .
+          cheap-exec --version
+          cheap-exec --help > /dev/null
