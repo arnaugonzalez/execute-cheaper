@@ -486,6 +486,17 @@ class CheapExecTest(unittest.TestCase):
             outcomes.append((r.returncode, "verified OK" in r.stdout, "agy: OK" in r.stdout))
         self.assertEqual(outcomes[0], outcomes[1])
 
+    def test_tty_summary_is_short_and_hides_home(self):
+        summary = {"status": "verified OK", "rounds": [{}], "elapsed_s": 51,
+                   "cost": {"paid": 0.0, "subscription": 0.0691, "unpriced": 1}}
+        report = Path.home() / ".local/state/execute-cheaper/runs/x/report.md"
+        out = ce.tty_summary(summary, ["app/main.py", "tests/test_main.py"], report)
+        self.assertEqual(len(out.splitlines()), 4)
+        self.assertIn("verified OK · 1 round · 51 s", out)
+        self.assertIn("$0.00 paid · $0.07 on subscriptions", out)
+        self.assertIn("~/.local/state/execute-cheaper/runs/x/report.md", out)
+        self.assertNotIn(str(Path.home()) + "/", out)
+
     def test_parse_reset(self):
         self.assertEqual(ce.parse_reset("3h6m37s"), 3 * 3600 + 6 * 60 + 37 + 60)
         self.assertEqual(ce.parse_reset("45m"), 45 * 60 + 60)

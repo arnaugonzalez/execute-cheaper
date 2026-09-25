@@ -13,4 +13,8 @@ First public release.
 - Provider chain with cooldowns persisted across runs; `agy` watchdog for quota hangs.
 - Independent read-only verifier (Claude Code or Codex) with a JSON Schema verdict and automatic repair rounds.
 - Cost ledger (`usage`), per-run `report.md`, exit codes 0/1/2/3.
+- In a terminal, `run` ends with a four-line summary (verdict, cost, files, report path); pipes, CI
+  and agents still get the full report on stdout.
+- Executors run without the user's terminal (no stdin, own session), so an interactive CLI can't
+  wait for input or draw over it.
 - `--on-event` hook for notifications and integrations; `init` command; XDG paths.

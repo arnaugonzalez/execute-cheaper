@@ -1,12 +1,11 @@
 [build-system]
-requires = ["hatchling>=1.24"]
+requires = ["hatchling>=1.24", "hatch-fancy-pypi-readme>=24"]
 build-backend = "hatchling.build"
 
 [project]
 name = "execute-cheaper"
-dynamic = ["version"]
+dynamic = ["version", "readme"]
 description = "Plan with an expensive model, execute with cheap ones, verify independently."
-readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -30,6 +29,21 @@ Changelog = "https://github.com/arnaugonzalez/execute-cheaper/blob/main/CHANGELO
 
 [project.scripts]
 execute-cheaper = "execute_cheaper:main"
+
+# PyPI does not resolve relative links: the README ships with them rewritten to GitHub URLs.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((docs/[^)]+)\)'
+replacement = '](https://raw.githubusercontent.com/arnaugonzalez/execute-cheaper/main/\g<1>)'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?!https?://|#)([^)]+)\)'
+replacement = '](https://github.com/arnaugonzalez/execute-cheaper/blob/main/\g<1>)'
 
 [tool.hatch.version]
 path = "execute_cheaper.py"

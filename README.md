@@ -1,43 +1,58 @@
 # execute-cheaper
 
-**Plan with the expensive model. Execute with the cheap ones. Verify independently.**
+**Your best model is a brilliant architect and a very expensive typist.**<br>
+Let it plan. Hand the typing to the coding CLIs you already pay for. Have someone else check the work.
 
 [![CI](https://github.com/arnaugonzalez/execute-cheaper/actions/workflows/ci.yml/badge.svg)](https://github.com/arnaugonzalez/execute-cheaper/actions/workflows/ci.yml)
-![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+[![PyPI](https://img.shields.io/pypi/v/execute-cheaper)](https://pypi.org/project/execute-cheaper/)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-You already have a good plan, written by you or by a frontier model. Having that same model type
-out every line is the expensive part. execute-cheaper hands the plan to a headless coding agent: the
-CLI subscriptions you already pay for first (Codex, GitHub Copilot, Antigravity, Claude Code, or any
-other coding CLI with a headless mode), then any cheap API
-you configure (OpenRouter, DeepSeek, GLM, a local model). It switches providers when one runs out
-of quota, and then has a **separate, read-only reviewer** check the git diff against the plan. The reviewer returns a typed verdict. If
-the verdict is not `ok`, its findings go back to the executor for a repair round.
+![A real run: cursor-agent is not installed, so the chain falls back to GitHub Copilot; a separate read-only Claude reviewer then approves the diff](docs/demo.gif)
 
-![A real run: cursor-agent is not installed, so the chain falls back to GitHub Copilot; then a read-only Claude verifier returns ok](https://raw.githubusercontent.com/arnaugonzalez/execute-cheaper/main/docs/demo.gif)
+<sub>A real run with idle frames cut. `cursor-agent` isn't installed, so the chain falls back to GitHub
+Copilot, then a separate, read-only Claude reviewer checks the diff against the plan.</sub>
 
-<sub>A real run, idle frames removed. Timestamps are real.</sub>
+It is not another coding agent (you have enough of those). It is one Python file that sits between
+the ones you already have.
 
-## Quickstart
+## What you can do with it
 
-Requires Python 3.11+, git and at least one agent CLI. The default config tries, in order,
-[Codex CLI](https://github.com/openai/codex) (`codex login` with a ChatGPT account; the preset models work
-even on the Free plan. Paid plans unlock stronger models and the names change often: check yours
-with `codex` → `/model`), [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli)
-(`copilot` once to sign in; works on the Student plan, where only `auto` model routing is available),
-Antigravity `agy`, and [Claude Code](https://docs.claude.com/en/docs/claude-code) on [OpenRouter](https://openrouter.ai/keys)
-with an API key. The verifier is Claude Code on your own Claude login. Providers you don't have are
-skipped; edit the chain to match what you use.
+- **Spend your plans on quota you aren't using.** Write the plan in Claude Code or with Opus, then let
+  the ChatGPT Free, Copilot Student or Antigravity plan you forgot about do the typing.
+- **Keep going when a quota runs out.** The chain falls through Codex → Copilot → Antigravity →
+  OpenRouter and remembers cooldowns between runs, so it stops knocking on closed doors.
+- **Get a review that can't mark its own homework.** The verifier runs in another process with no
+  edit tools, compares `git diff` to the plan and answers `ok`, `incomplete`, `out_of_scope` or
+  `regression`. Anything but `ok` goes back to the executor with the findings.
+- **Hand it to CI or to another agent.** Exit codes 0/1/2/3 and a `report.md` for every run.
+- **Run it fully local** with Ollama, LM Studio or anything else that speaks the Anthropic Messages API.
+- **Know what each task cost**, split into money paid and subscription usage.
+
+Same plan, measured on 2026-09-24 ([how](#measured-cost)): **$0.139** with Sonnet doing everything ·
+**$0.003** with DeepSeek typing and a Claude subscription reviewing · **$0** on ChatGPT's Free plan.
+
+## Install
 
 ```bash
-pipx install execute-cheaper            # or: uv tool install execute-cheaper
-execute-cheaper init                    # writes ~/.config/execute-cheaper/config.json and .env
-echo "OPENROUTER_API_KEY=sk-or-..." >> ~/.config/execute-cheaper/.env   # optional API fallback
+pipx install execute-cheaper      # or: uv tool install execute-cheaper
+execute-cheaper init              # writes ~/.config/execute-cheaper/config.json and .env
+execute-cheaper status            # which of your CLIs and keys it found
 execute-cheaper run --plan PLAN.md --cwd path/to/repo
 ```
 
-`execute-cheaper status` shows which providers are ready (binary found, logged in or key present) and
-which are cooling down. Plans are plain Markdown; see [`examples/plans/`](examples/plans/).
+Needs Python 3.11+, git and at least one of these. Whatever you don't have is skipped.
+
+| | Measured by the author | Also supported |
+|---|---|---|
+| **Subscriptions** | Codex CLI (`codex login`, ChatGPT Free and up) · GitHub Copilot CLI (Student and up) · your Claude Code login | Antigravity `agy` · `cursor-agent`, opencode and Gemini CLI as [untested presets](examples/providers/) |
+| **APIs** | OpenRouter | DeepSeek · Z.ai GLM · Anthropic · any Anthropic Messages-compatible endpoint |
+| **Local** | | Ollama · LM Studio · vLLM · llama.cpp · LiteLLM proxy |
+
+A plan is plain Markdown: the tasks, what is out of scope, and the checks to run. See
+[`examples/plans/`](examples/plans/). Free and student plans restrict which models you get; see
+[Limits](#limits-and-non-goals).
 
 ## What a run looks like
 
@@ -75,7 +90,7 @@ auditable cost record.
 | **Aider** architect/editor | Built-in two-model workflow, repo map, auto lint/test | Wrapping any agent CLI, an independent verifier process, provider fallback with cooldowns |
 | **LiteLLM** router / proxy | Production-grade fallbacks, retries, budgets, cost tracking at the HTTP layer | Knowing what a plan and a diff are. The two combine: point a provider's `base_url` at your LiteLLM proxy |
 | **claude-code-router** | Routing Claude Code requests per scenario (background, long context) to many providers | A run with a verdict and a cost figure, not a request router |
-| **OpenHands / opencode / Codex `exec`** | Full agent platforms: sandboxing, many providers, rich UIs | Being one stdlib-only Python file (~1k lines) of glue *around* such agents, meant to be called by another agent or CI |
+| **OpenHands / opencode / Codex `exec`** | Full agent platforms: sandboxing, many providers, rich UIs | Being one stdlib-only Python file (~1.2k lines) of glue *around* such agents, meant to be called by another agent or CI |
 | **Claude Code subagents** | Zero setup inside a session | Using non-Claude models without a proxy, and a verifier that does not share the parent's context |
 
 ## Configuration

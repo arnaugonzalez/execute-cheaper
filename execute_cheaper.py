@@ -577,7 +577,8 @@ def run_claude(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str,
         cmd += ["--max-budget-usd", str(max_budget)]
     log(f"{label} > claude -p --model {model}")
     try:
-        proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout_s, check=False)
+        proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout_s, check=False,
+                              stdin=subprocess.DEVNULL, start_new_session=True)
     except FileNotFoundError:
         return {"ok": False, "text": "", "reason": f"binary not found: {bin_name}"}
     except subprocess.TimeoutExpired:
@@ -626,7 +627,7 @@ def run_codex(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, 
     log(f"{label} > codex exec -m {model}")
     try:
         proc = subprocess.run(cmd, cwd=cwd, input=prompt, capture_output=True, text=True, timeout=timeout_s,
-                              check=False)
+                              check=False, start_new_session=True)
     except FileNotFoundError:
         return {"ok": False, "text": "", "reason": f"binary not found: {cmd[0]}"}
     except subprocess.TimeoutExpired:
@@ -716,8 +717,10 @@ def run_cli(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, pc
     (run_dir / f"{label}-prompt.md").write_text(prompt, encoding="utf-8")
     log(f"{label} > {cmd[0]} ({model}{', prompt on stdin' if via_stdin else ''})")
     try:
-        proc = subprocess.run(cmd, cwd=cwd, input=prompt if via_stdin else None, env=env, capture_output=True,
-                              text=True, timeout=pcfg.get("timeout_s", 3600), check=False)
+        # No stdin and no controlling terminal: interactive CLIs otherwise wait on, or draw over, the user's terminal.
+        stdin = {"input": prompt} if via_stdin else {"stdin": subprocess.DEVNULL}
+        proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, start_new_session=True,
+                              timeout=pcfg.get("timeout_s", 3600), check=False, **stdin)
     except FileNotFoundError:
         return {"ok": False, "text": "", "reason": f"binary not found: {cmd[0]}"}
     except subprocess.TimeoutExpired:
@@ -904,6 +907,20 @@ def write_report(run_dir: Path, summary: dict) -> Path:
     return path
 
 
+def tty_summary(summary: dict, changed: list[str], report: Path) -> str:
+    ok = summary["status"] == "verified OK"
+    mark = "\033[32m✔\033[0m" if ok else "\033[33m✘\033[0m"
+    c = summary["cost"]
+    home = str(Path.home())
+    path = str(report).replace(home, "~", 1) if str(report).startswith(home) else str(report)
+    lines = [f"{mark} {summary['status']} · {len(summary['rounds'])} round{'s' if len(summary['rounds']) != 1 else ''}"
+             f" · {summary['elapsed_s']} s",
+             f"  cost    ${c['paid']:.2f} paid · ${c['subscription']:.2f} on subscriptions",
+             f"  files   {', '.join(changed) or 'none'}",
+             f"  report  {path}"]
+    return "\n".join(lines)
+
+
 def run_costs(run_id: str) -> dict:
     paid = sub = 0.0
     unpriced = 0
@@ -949,7 +966,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     tier = args.tier
     max_rounds = args.max_rounds or cfg["max_rounds"]
     t_start = time.monotonic()
-    log(f"run {run_id} · tier={tier} · chain={cfg['chain']} · verify={'none' if verify_off else cfg['verify']['provider']}")
+    log(f"run {run_id} · {' → '.join(cfg['chain'])} · verify: {'none' if verify_off else cfg['verify']['provider']}"
+        + (f" · tier {tier}" if tier != "flash" else ""))
     summary = {"run_id": run_id, "cwd": str(cwd), "tier": tier, "plan": str(plan_path),
                "status": "pending", "rounds": []}
     findings = None
@@ -1021,7 +1039,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     emit(hook, "run_end", run_id=run_id, status=summary["status"], exit_code=code, report=str(report),
          files=changed, elapsed_s=summary["elapsed_s"], cost=summary["cost"])
     print()
-    print(report.read_text(encoding="utf-8"))
+    if sys.stdout.isatty():  # a person watching: the short version; pipes, CI and agents get the whole report
+        print(tty_summary(summary, changed, report))
+    else:
+        print(report.read_text(encoding="utf-8"))
     return code
 
 
