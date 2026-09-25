@@ -14,7 +14,9 @@ you configure (OpenRouter, DeepSeek, GLM, a local model). It switches providers 
 of quota, and then has a **separate, read-only reviewer** check the git diff against the plan. The reviewer returns a typed verdict. If
 the verdict is not `ok`, its findings go back to the executor for a repair round.
 
-<!-- demo GIF (≤20 s): execute-cheaper run → provider fallback → verdict → report.md -->
+![A real run: cursor-agent is not installed, so the chain falls back to GitHub Copilot; then a read-only Claude verifier returns ok](https://raw.githubusercontent.com/arnaugonzalez/execute-cheaper/main/docs/demo.gif)
+
+<sub>A real run, idle frames removed. Timestamps are real.</sub>
 
 ## Quickstart
 
@@ -55,7 +57,7 @@ report.md · ledger.jsonl · exit code 0 (verified) / 2 (not verified) / 3 (veri
 flowchart LR
   P[plan.md] --> C{provider chain}
   C -->|cooldown / no key| C
-  C --> E[executor: codex / agy / claude -p]
+  C --> E[executor: codex / copilot / agy / claude -p / any cli]
   E --> D[git diff]
   D --> V[verifier: read-only, JSON Schema]
   V -->|ok| R[report.md + ledger]

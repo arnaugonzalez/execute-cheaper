@@ -843,6 +843,8 @@ def execute_chain(prompt: str, cwd: Path, run_dir: Path, tier: str, cfg: dict, s
         model = pcfg["models"][tier]
         res["tokens"] = norm_usage(res.get("usage"))
         res["cost_usd"] = attempt_cost(pcfg, model, res)
+        if res["cost_usd"] is None and not res["ok"] and res["seconds"] == 0 and not any(res["tokens"].values()):
+            res["cost_usd"] = 0.0  # never started (binary not found, missing key): nothing was spent
         ledger_append({"ts": iso(now()), "run_id": run_id, "role": "executor", "provider": prov, "model": model,
                        "billing": pcfg.get("billing", "paid"), "round": round_no, "ok": res["ok"],
                        **res["tokens"], "cost_usd": res["cost_usd"], "seconds": res["seconds"]})
@@ -894,7 +896,8 @@ def write_report(run_dir: Path, summary: dict) -> Path:
                 lines.append(f"- check: {c}")
         lines.append("")
     lines.append(f"Cost: ${summary['cost']['paid']:.4f} paid · ${summary['cost']['subscription']:.4f} "
-                 f"subscription-equivalent · {summary['cost']['unpriced']} unpriced attempts")
+                 f"subscription-equivalent · {summary['cost']['unpriced']} unpriced "
+                 f"attempt{'' if summary['cost']['unpriced'] == 1 else 's'}")
     lines.append(f"Artifacts: {run_dir}")
     path = run_dir / "report.md"
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -997,11 +1000,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         summary["rounds"].append(rnd)
         emit(hook, "verify", run_id=run_id, round=round_no, verdict=v["verdict"], summary=v.get("summary", ""))
         if v["verdict"] == "ok":
+            log(f"verify ok · {len(v.get('checks_run') or [])} checks run")
             summary["status"] = "verified OK"
             break
         findings = v
         summary["status"] = f"verification: {v['verdict']}"
-        log(f"verification {v['verdict']} -> {'repair round' if round_no < max_rounds else 'no rounds left'}")
+        log(f"verify {v['verdict']} -> {'repair round' if round_no < max_rounds else 'no rounds left'}")
 
     summary["elapsed_s"] = int(time.monotonic() - t_start)
     summary["cost"] = run_costs(run_id)

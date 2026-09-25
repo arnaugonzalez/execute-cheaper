@@ -377,6 +377,17 @@ class CheapExecTest(unittest.TestCase):
         self.assertIn("not logged in", r.stdout + r.stderr)
         self.assertNotIn("cli", json.loads((self.state / "state.json").read_text()).get("cooldowns", {}))
 
+    def test_attempt_that_never_started_costs_nothing(self):
+        self.config["providers"]["gone"] = dict(self.config["providers"]["cli"], cmd=["no-such-cli", "-p", "{prompt}"])
+        self.config["chain"] = ["gone", "cheapapi"]
+        self.save_config()
+        r = self.run_cli("run", "--plan", "PLAN.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("binary not found: no-such-cli", r.stdout)
+        gone = next(e for e in self.ledger() if e["provider"] == "gone")
+        self.assertEqual(gone["cost_usd"], 0.0)
+        self.assertIn("0 unpriced attempts", r.stdout)
+
     def test_cli_cannot_verify_and_needs_cmd(self):
         self.config["verify"] = {"provider": "cli", "tier": "pro"}
         self.config["providers"]["cli"]["cmd"] = "fake-cli -p {prompt}"

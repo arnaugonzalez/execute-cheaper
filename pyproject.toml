@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "execute-cheaper"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Plan with an expensive model, execute with cheap ones, verify independently."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,8 +23,16 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/arnaugonzalez/execute-cheaper"
+Issues = "https://github.com/arnaugonzalez/execute-cheaper/issues"
+Changelog = "https://github.com/arnaugonzalez/execute-cheaper/blob/main/CHANGELOG.md"
+
 [project.scripts]
 execute-cheaper = "execute_cheaper:main"
+
+[tool.hatch.version]
+path = "execute_cheaper.py"
 
 [tool.hatch.build.targets.wheel]
 only-include = ["execute_cheaper.py"]
