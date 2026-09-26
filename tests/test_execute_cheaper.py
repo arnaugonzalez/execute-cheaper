@@ -97,8 +97,8 @@ FAKE_CLI = textwrap.dedent(r"""
     [ -z "$prompt" ] && prompt="$(cat)"
     [ -n "${FAKE_ARGS_LOG:-}" ] && echo "cli model=$model prompt_len=${#prompt}" >> "$FAKE_ARGS_LOG"
     if [ -n "${FAKE_ISOLATION_LOG:-}" ]; then
-      sid="$(ps -o sid= -p $$ | tr -d ' ')"; extra="$(cat | wc -c | tr -d " ")"
-      echo "own_session=$([ "$sid" = "$$" ] && echo yes || echo no) stdin_bytes=$extra" >> "$FAKE_ISOLATION_LOG"
+      pgid="$(ps -o pgid= -p $$ | tr -d " ")"; extra="$(cat | wc -c | tr -d " ")"
+      echo "own_session=$([ "$pgid" = "$$" ] && echo yes || echo no) stdin_bytes=$extra" >> "$FAKE_ISOLATION_LOG"
     fi
     case "${FAKE_CLI:-ok}" in
       fail0) echo "Execution failed: Error: The requested model is not supported."; exit 0;;
