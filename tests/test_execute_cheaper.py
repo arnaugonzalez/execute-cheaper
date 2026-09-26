@@ -96,6 +96,10 @@ FAKE_CLI = textwrap.dedent(r"""
     done
     [ -z "$prompt" ] && prompt="$(cat)"
     [ -n "${FAKE_ARGS_LOG:-}" ] && echo "cli model=$model prompt_len=${#prompt}" >> "$FAKE_ARGS_LOG"
+    if [ -n "${FAKE_ISOLATION_LOG:-}" ]; then
+      sid="$(ps -o sid= -p $$ | tr -d ' ')"; extra="$(cat | wc -c | tr -d " ")"
+      echo "own_session=$([ "$sid" = "$$" ] && echo yes || echo no) stdin_bytes=$extra" >> "$FAKE_ISOLATION_LOG"
+    fi
     case "${FAKE_CLI:-ok}" in
       fail0) echo "Execution failed: Error: The requested model is not supported."; exit 0;;
       quota) echo "Error: You have exceeded your premium requests for this month." >&2; exit 1;;
@@ -342,6 +346,14 @@ class CheapExecTest(unittest.TestCase):
         # cache writes count as input; the usage file is the only source of these numbers.
         self.assertEqual((ex["input"], ex["cached"], ex["output"], ex["billing"]), (15710, 0, 5, "subscription"))
 
+    def test_cli_runs_in_own_session_without_stdin(self):
+        self.config["chain"] = ["cli"]
+        self.save_config()
+        iso = self.tmp / "iso.log"
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_ISOLATION_LOG": str(iso)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(iso.read_text().strip(), "own_session=yes stdin_bytes=0")
+
     def test_cli_stdin_prompt_and_json_output(self):
         self.config["chain"] = ["cli"]
         self.config["providers"]["cli"].update(
@@ -496,6 +508,14 @@ class CheapExecTest(unittest.TestCase):
         self.assertIn("$0.00 paid · $0.07 on subscriptions", out)
         self.assertIn("~/.local/state/execute-cheaper/runs/x/report.md", out)
         self.assertNotIn(str(Path.home()) + "/", out)
+
+    def test_claude_code_plugin_manifests(self):
+        market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
+        plugin_dir = ROOT / market["plugins"][0]["source"]
+        manifest = json.loads((plugin_dir / ".claude-plugin" / "plugin.json").read_text())
+        self.assertEqual(manifest["version"], ce.__version__)  # bump both together
+        skill = (plugin_dir / "skills" / "execute-cheaper" / "SKILL.md").read_text()
+        self.assertTrue(skill.startswith("---\nname: execute-cheaper\n"))
 
     def test_parse_reset(self):
         self.assertEqual(ce.parse_reset("3h6m37s"), 3 * 3600 + 6 * 60 + 37 + 60)

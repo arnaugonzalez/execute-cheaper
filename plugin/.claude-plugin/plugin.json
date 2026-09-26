@@ -1,0 +1,12 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "execute-cheaper",
+  "version": "0.1.0",
+  "description": "Plan in Claude Code, hand the typing to Codex, Copilot, Antigravity or cheap APIs, and get an independent read-only verdict back.",
+  "author": {"name": "Arnau González", "url": "https://github.com/arnaugonzalez"},
+  "homepage": "https://github.com/arnaugonzalez/execute-cheaper",
+  "repository": "https://github.com/arnaugonzalez/execute-cheaper",
+  "license": "MIT",
+  "keywords": ["codex", "copilot", "cost", "usage-limits", "verification", "delegation"],
+  "skills": ["./skills/"]
+}

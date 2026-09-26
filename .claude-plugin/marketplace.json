@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "execute-cheaper",
+  "owner": {"name": "Arnau González", "url": "https://github.com/arnaugonzalez"},
+  "metadata": {
+    "description": "The execute-cheaper skill for Claude Code: plan here, execute with the coding CLIs you already pay for, verify independently."
+  },
+  "plugins": [
+    {
+      "name": "execute-cheaper",
+      "source": "./plugin",
+      "description": "Hand a written plan to cheaper executors through the execute-cheaper CLI and read an independent verdict.",
+      "category": "development"
+    }
+  ]
+}

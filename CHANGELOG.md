@@ -17,4 +17,8 @@ First public release.
   and agents still get the full report on stdout.
 - Executors run without the user's terminal (no stdin, own session), so an interactive CLI can't
   wait for input or draw over it.
+- Claude Code plugin: this repo is its own marketplace; the `execute-cheaper` skill writes the plan,
+  launches the run in the background and reads only the verdict.
+- Release hardening: Trusted Publishing, maintainer approval for every PyPI upload, GitHub Actions
+  pinned by commit SHA with least-privilege permissions, Dependabot for Actions.
 - `--on-event` hook for notifications and integrations; `init` command; XDG paths.

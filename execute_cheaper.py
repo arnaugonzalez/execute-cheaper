@@ -474,8 +474,8 @@ def run_agy(prompt: str, cwd: Path, run_dir: Path, model: str, pcfg: dict) -> di
     try:
         # Own process group: on abort, agy's children must die too, or an orphan keeps the
         # pipe open and communicate() never returns.
-        proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                start_new_session=True)
+        proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
     except FileNotFoundError:
         return {"ok": False, "text": "", "reason": f"binary not found: {cmd[0]}"}
     verdict = {"reason": None, "reset_s": 0}

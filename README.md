@@ -19,7 +19,7 @@ the ones you already have.
 
 ## What you can do with it
 
-- **Spend your plans on quota you aren't using.** Write the plan in Claude Code or with Opus, then let
+- **Stop spending Claude Code's usage limits on typing.** Write the plan in Claude Code or with Opus, then let
   the ChatGPT Free, Copilot Student or Antigravity plan you forgot about do the typing.
 - **Keep going when a quota runs out.** The chain falls through Codex → Copilot → Antigravity →
   OpenRouter and remembers cooldowns between runs, so it stops knocking on closed doors.
@@ -53,6 +53,19 @@ Needs Python 3.11+, git and at least one of these. Whatever you don't have is sk
 A plan is plain Markdown: the tasks, what is out of scope, and the checks to run. See
 [`examples/plans/`](examples/plans/). Free and student plans restrict which models you get; see
 [Limits](#limits-and-non-goals).
+
+### From Claude Code
+
+Plan in Claude Code, then let it hand the plan off: the plugin adds a skill that writes the plan as a
+contract, launches `execute-cheaper` in the background and reads only the verdict.
+
+```text
+/plugin marketplace add arnaugonzalez/execute-cheaper
+/plugin install execute-cheaper@execute-cheaper
+```
+
+Then ask for it in plain words ("run this plan cheaply", "let Codex implement it, I'm close to my
+usage limit"). The skill is a plain `SKILL.md` in [`plugin/`](plugin/skills/execute-cheaper/SKILL.md).
 
 ## What a run looks like
 
