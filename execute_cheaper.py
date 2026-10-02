@@ -160,8 +160,8 @@ AGY_QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED \(code 429\)[^\n]*?Resets in ([0-
 CODEX_QUOTA_RE = re.compile(r"usage limit|rate limit|quota|429|too many requests", re.I)
 CODEX_AUTH_RE = re.compile(r"sign in again|log ?in|401 unauthorized|not logged in", re.I)
 # Defaults for kind "cli"; a preset overrides them with its own quota_re / auth_re.
-CLI_QUOTA_RE = r"usage limit|rate limit|quota|429|too many requests|resource_exhausted|premium requests"
-CLI_AUTH_RE = r"not (?:logged|signed) in|log ?in (?:required|first)|unauthorized|401|error authenticating"
+CLI_QUOTA_RE = r"usage limit|rate limit|quota|\b429\b|too many requests|resource_exhausted|premium requests"
+CLI_AUTH_RE = r"not (?:logged|signed) in|log ?in (?:required|first)|unauthorized|\b401\b|error authenticating"
 CLAUDE_QUOTA_RE = re.compile(r"usage limit|rate limit|out of (?:extra )?usage|quota|resets? (?:at|in) ([^\n\"]+)|429", re.I)
 
 VERIFY_SCHEMA = {

@@ -112,6 +112,7 @@ FAKE_CLI = textwrap.dedent(r"""
              echo '{"type":"step_finish","part":{"tokens":{"input":50,"output":10,"reasoning":0,"cache":{"read":1000,"write":0}},"cost":0.0005}}'
              echo "done by cli" > cli-was-here.txt; exit 0;;
       jsonl_error) echo '{"type":"error","error":{"name":"UnknownError","data":{"message":"Provider not found"}}}'; exit 0;;
+      jsonl_quota) echo '{"type":"error","timestamp":1790957893401,"error":{"name":"APIError","data":{"message":"Usage limit reached for 5 hour"}}}'; exit 0;;
     esac
     echo "done by cli" > cli-was-here.txt
     [ -n "$usage" ] && echo '{"tokenDetails":{"input":{"tokenCount":3},"cache_read":{"tokenCount":0},"cache_write":{"tokenCount":15707},"output":{"tokenCount":5}}}' > "$usage"
@@ -398,6 +399,18 @@ class CheapExecTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("Provider not found", r.stdout + r.stderr)
         self.assertIn("cheapapi: OK", r.stdout)
+
+    def test_cli_jsonl_quota_is_not_mistaken_for_auth(self):
+        preset = json.loads((ROOT / "examples" / "providers" / "opencode-zai.json").read_text())["opencode-zai"]
+        self.config["chain"] = ["cli", "cheapapi"]
+        self.config["providers"]["cli"] = dict(preset, cmd=["fake-cli", "-p", "{prompt}"])
+        self.save_config()
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_CLI": "jsonl_quota"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("not logged in", r.stdout + r.stderr)  # the timestamp contains "401"
+        cooldown = json.loads((self.state / "state.json").read_text())["cooldowns"]["cli"]
+        self.assertIn("cheapapi: OK", r.stdout)
+        self.assertTrue(cooldown)
 
     def test_cli_exit_zero_failure_is_detected(self):
         self.config["chain"] = ["cli", "cheapapi"]
