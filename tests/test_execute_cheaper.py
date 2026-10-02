@@ -106,6 +106,12 @@ FAKE_CLI = textwrap.dedent(r"""
       auth) echo "Error: not logged in. Run the CLI and sign in." >&2; exit 1;;
       json) echo '{"response":"files changed: cli-was-here.txt","stats":{"models":{"m-a":{"tokens":{"prompt":100,"cached":40,"candidates":7}},"m-b":{"tokens":{"prompt":50,"cached":0,"candidates":3}}}}}'
             echo "done by cli" > cli-was-here.txt; exit 0;;
+      jsonl) echo '{"type":"step_finish","part":{"tokens":{"input":900,"output":20,"reasoning":5,"cache":{"read":100,"write":0}},"cost":0.001}}'
+             echo 'progress line that is not JSON'
+             echo '{"type":"text","part":{"text":"files changed: cli-was-here.txt"}}'
+             echo '{"type":"step_finish","part":{"tokens":{"input":50,"output":10,"reasoning":0,"cache":{"read":1000,"write":0}},"cost":0.0005}}'
+             echo "done by cli" > cli-was-here.txt; exit 0;;
+      jsonl_error) echo '{"type":"error","error":{"name":"UnknownError","data":{"message":"Provider not found"}}}'; exit 0;;
     esac
     echo "done by cli" > cli-was-here.txt
     [ -n "$usage" ] && echo '{"tokenDetails":{"input":{"tokenCount":3},"cache_read":{"tokenCount":0},"cache_write":{"tokenCount":15707},"output":{"tokenCount":5}}}' > "$usage"
@@ -368,6 +374,30 @@ class CheapExecTest(unittest.TestCase):
         self.assertRegex(log_path.read_text(errors="replace"), r"prompt_len=[1-9]\d+")  # arrived through stdin
         ex = next(e for e in self.ledger() if e["role"] == "executor")
         self.assertEqual((ex["input"], ex["cached"], ex["output"]), (150, 40, 10))  # '*' sums both models
+
+    def test_cli_jsonl_events_sum_usage_and_cli_cost(self):
+        preset = json.loads((ROOT / "examples" / "providers" / "opencode.json").read_text())["opencode"]
+        self.config["chain"] = ["cli"]
+        self.config["providers"]["cli"] = dict(preset, cmd=["fake-cli", "--model", "{model}", "-p", "{prompt}"],
+                                               models={"flash": "x-flash", "pro": "x-pro"})
+        self.save_config()
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_CLI": "jsonl"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("cli: OK", r.stdout)
+        ex = next(e for e in self.ledger() if e["role"] == "executor")
+        self.assertEqual((ex["input"], ex["cached"], ex["output"]), (950, 1100, 35))  # reasoning counts as output
+        self.assertAlmostEqual(ex["cost_usd"], 0.0015)  # no price table: the CLI's own figure
+
+    def test_cli_jsonl_error_event_falls_through(self):
+        preset = json.loads((ROOT / "examples" / "providers" / "opencode.json").read_text())["opencode"]
+        self.config["chain"] = ["cli", "cheapapi"]
+        self.config["providers"]["cli"] = dict(preset, cmd=["fake-cli", "-p", "{prompt}"],
+                                               models={"flash": "x-flash", "pro": "x-pro"})
+        self.save_config()
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_CLI": "jsonl_error"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Provider not found", r.stdout + r.stderr)
+        self.assertIn("cheapapi: OK", r.stdout)
 
     def test_cli_exit_zero_failure_is_detected(self):
         self.config["chain"] = ["cli", "cheapapi"]

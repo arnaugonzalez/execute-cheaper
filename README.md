@@ -165,8 +165,9 @@ opencode).
 | `sandbox` | `codex` only: `on` (default, Codex's sandbox) or `none` |
 | `peak` | Optional price multiplier by UTC hour window |
 | `cmd` | `cli` only: argv with `{prompt}`, `{model}`, `{run_dir}` and `{label}` placeholders. Without `{prompt}` the prompt goes to stdin (use that for CLIs that read it: argv entries are capped at 128 KiB on Linux) |
-| `output`, `text_field` | `cli` only: `text` (default; stdout is the executor's report) or `json` (stdout is a JSON document or JSON lines; `text_field` is the dotted path of the report inside it) |
+| `output`, `text_field` | `cli` only: `text` (default; stdout is the executor's report), `json` (stdout is a JSON document or JSON lines; `text_field` is the dotted path of the report inside it) or `jsonl` (an event stream such as `opencode run --format json`: `text_field` is joined across events and usage is summed over all of them) |
 | `usage`, `usage_file` | `cli` only: `{"input_tokens": "dotted.path", ...}` read from that JSON, or from `usage_file` when the CLI writes one. `*` in a path sums every key (per-model stats) |
+| `cost_field` | `cli` only: dotted path of the USD cost the CLI reports itself (opencode prices from models.dev). Used only when `prices` has no entry for the model, so a subscription can still be priced at its pay-as-you-go equivalent |
 | `fail_re`, `quota_re`, `auth_re` | `cli` only: regexes over stdout+stderr. `fail_re` marks failures that still exit 0; the other two turn a failure into a cooldown or a "sign in" hint (defaults cover the usual wording) |
 
 Adding a CLI is config, not code: describe its headless invocation with `kind: "cli"` and it becomes

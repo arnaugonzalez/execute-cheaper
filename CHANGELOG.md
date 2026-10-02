@@ -9,7 +9,9 @@ First public release.
   DeepSeek, Z.ai, Ollama/LM Studio/LiteLLM proxy) as configurable API fallback.
 - Generic `cli` adapter: any headless coding CLI becomes an executor from config alone (argv
   template, text or JSON output, usage paths, failure/quota/auth regexes). Copilot is the tested
-  preset; Gemini CLI, `cursor-agent` and opencode ship untested in `examples/providers/`.
+  preset; Gemini CLI and `cursor-agent` ship untested in `examples/providers/`.
+- `cli` adapter `output: "jsonl"` for event-stream CLIs (usage summed over every event) and `cost_field`
+  for the cost a CLI reports itself; tested opencode preset, plus presets for the Z.ai and MiniMax coding plans.
 - Provider chain with cooldowns persisted across runs; `agy` watchdog for quota hangs.
 - Independent read-only verifier (Claude Code or Codex) with a JSON Schema verdict and automatic repair rounds.
 - Cost ledger (`usage`), per-run `report.md`, exit codes 0/1/2/3.

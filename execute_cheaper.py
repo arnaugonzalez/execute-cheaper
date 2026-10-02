@@ -234,6 +234,8 @@ def validate_config(cfg: dict) -> list[str]:
         if p.get("kind") == "cli":
             if not (isinstance(p.get("cmd"), list) and p["cmd"] and all(isinstance(a, str) for a in p["cmd"])):
                 errs.append(f"providers.{name}.cmd must be a non-empty list of strings (argv with {{prompt}} etc.)")
+            if p.get("output", "text") not in ("text", "json", "jsonl"):
+                errs.append(f"providers.{name}.output must be 'text', 'json' or 'jsonl', got {p.get('output')!r}")
             for field in ("fail_re", "quota_re", "auth_re"):
                 try:
                     re.compile(p.get(field) or "")
@@ -341,6 +343,8 @@ def attempt_cost(pcfg: dict, model: str, res: dict) -> float | None:
     if est is not None:
         return est
     if pcfg.get("kind") == "claude" and not pcfg.get("base_url"):
+        return res.get("cost_usd")
+    if pcfg.get("kind") == "cli" and pcfg.get("cost_field"):
         return res.get("cost_usd")
     return None
 
@@ -686,8 +690,9 @@ def run_codex(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, 
 # --- adapter: cli (any headless coding CLI, described by config) ------------
 
 def jpath(data, path: str) -> list:
-    """Leaves at a dotted path inside nested dicts; '*' descends into every key (e.g. per-model stats)."""
-    cur = [data]
+    """Leaves at a dotted path inside nested dicts; '*' descends into every key (e.g. per-model stats).
+    A list at the top (JSON-lines events) is searched event by event."""
+    cur = list(data) if isinstance(data, list) else [data]
     for part in path.split("."):
         cur = [v for c in cur if isinstance(c, dict) for v in (c.values() if part == "*" else [c.get(part)])]
     return [c for c in cur if c is not None]
@@ -697,9 +702,11 @@ def run_cli(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, pc
     """Executor for any coding CLI with a headless mode (Copilot, Gemini CLI, cursor-agent, opencode...).
     The provider config describes it (README → kind "cli"):
     - cmd: argv with {prompt} {model} {run_dir} {label} placeholders; without {prompt}, the prompt goes to stdin.
-    - output: "text" (default: stdout is the executor's report) or "json" (stdout is one JSON document or JSON
-      lines; "text_field" is the dotted path of the report inside it).
+    - output: "text" (default: stdout is the executor's report), "json" (stdout is one JSON document or JSON
+      lines; "text_field" is the dotted path of the report inside it) or "jsonl" (an event stream: text_field
+      leaves are joined across events and usage counters are summed over every event, e.g. opencode's steps).
     - usage: {"input_tokens": "dotted.path", ...} into that JSON, or into "usage_file" when the CLI writes one.
+    - cost_field: dotted path of the USD cost the CLI reports itself; used only when "prices" has no entry.
     - fail_re / quota_re / auth_re: matched against stdout+stderr because some CLIs exit 0 on failure."""
     subs = {"prompt": prompt, "model": model, "run_dir": str(run_dir), "label": label}
     via_stdin = not any("{prompt}" in str(a) for a in pcfg["cmd"])
@@ -740,7 +747,20 @@ def run_cli(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, pc
             return {"ok": False, "text": "", "reason": "quota", "reset_s": int(pcfg.get("quota_reset_s", 3600))}
         return {"ok": False, "text": out, "reason": f"exit {proc.returncode}: {tail}"}
     text, data = out, None
-    if pcfg.get("output") == "json":
+    if pcfg.get("output") == "jsonl":
+        data = []
+        for ln in out.splitlines():
+            try:
+                ev = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(ev, dict):
+                data.append(ev)
+        if not data:
+            return {"ok": False, "text": out, "reason": f"expected JSON lines on stdout, got: {out.strip()[:200]!r}"}
+        if pcfg.get("text_field"):
+            text = "\n".join(str(t) for t in jpath(data, pcfg["text_field"]))
+    elif pcfg.get("output") == "json":
         candidates = [out.strip()] + [ln.strip() for ln in reversed(out.splitlines()) if ln.strip().startswith("{")]
         for c in candidates:
             try:
@@ -765,10 +785,14 @@ def run_cli(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, pc
                     src = None
         for counter, upath in pcfg["usage"].items():
             usage[counter] = sum(n for n in jpath(src, upath) if isinstance(n, (int, float)))
+    cost = None
+    if pcfg.get("cost_field") and data is not None:
+        costs = [n for n in jpath(data, pcfg["cost_field"]) if isinstance(n, (int, float))]
+        cost = sum(costs) if costs else None
     if not text.strip():
         return {"ok": False, "text": "", "reason": "the CLI exited 0 but printed nothing: check its headless flags",
-                "usage": usage}
-    return {"ok": True, "text": text, "reason": None, "usage": usage}
+                "usage": usage, "cost_usd": cost}
+    return {"ok": True, "text": text, "reason": None, "usage": usage, "cost_usd": cost}
 
 
 def run_executor(name: str, pcfg: dict, prompt: str, cwd: Path, run_dir: Path, tier: str, secrets: dict) -> dict:

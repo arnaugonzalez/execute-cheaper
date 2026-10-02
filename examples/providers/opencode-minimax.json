@@ -1,0 +1,43 @@
+{
+  "opencode-minimax": {
+    "kind": "cli",
+    "cmd": [
+      "opencode",
+      "run",
+      "--pure",
+      "--auto",
+      "--format",
+      "json",
+      "--title",
+      "execute-cheaper {label}",
+      "-m",
+      "{model}",
+      "{prompt}"
+    ],
+    "output": "jsonl",
+    "text_field": "part.text",
+    "fail_re": "^\\{\"type\":\"error\"",
+    "usage": {
+      "input_tokens": "part.tokens.input",
+      "cache_read_input_tokens": "part.tokens.cache.read",
+      "cache_creation_input_tokens": "part.tokens.cache.write",
+      "output_tokens": "part.tokens.output",
+      "thinking_tokens": "part.tokens.reasoning"
+    },
+    "cost_field": "part.cost",
+    "models": {
+      "flash": "minimax-coding-plan/MiniMax-M3.1-Flash-Preview",
+      "pro": "minimax-coding-plan/MiniMax-M3"
+    },
+    "timeout_s": 3600,
+    "billing": "subscription",
+    "quota_reset_s": 18000,
+    "prices": {
+      "minimax-coding-plan/MiniMax-M3": [
+        0.3,
+        0.06,
+        1.2
+      ]
+    }
+  }
+}
