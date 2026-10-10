@@ -565,7 +565,7 @@ def claude_env(pcfg: dict, key: str | None, model: str) -> tuple[dict, str | Non
 def run_claude(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, env: dict,
                config_dir: str | None, timeout_s: int, disallowed: list[str] | None = None,
                json_schema: dict | None = None, max_budget: float | None = None,
-               setting_sources: str = "user", bin_name: str = "claude") -> dict:
+               setting_sources: str = "user", bin_name: str = "claude", effort: str | None = None) -> dict:
     if config_dir:
         env = dict(env, CLAUDE_CONFIG_DIR=config_dir)
     # No --bare: bare mode ignores subscription logins and trims the executor's tools. Instead:
@@ -579,7 +579,9 @@ def run_claude(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str,
         cmd += ["--json-schema", json.dumps(json_schema)]
     if max_budget:
         cmd += ["--max-budget-usd", str(max_budget)]
-    log(f"{label} > claude -p --model {model}")
+    if effort:
+        cmd += ["--effort", effort]
+    log(f"{label} > claude -p --model {model}" + (f" --effort {effort}" if effort else ""))
     try:
         proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout_s, check=False,
                               stdin=subprocess.DEVNULL, start_new_session=True)
@@ -809,7 +811,8 @@ def run_executor(name: str, pcfg: dict, prompt: str, cwd: Path, run_dir: Path, t
     env, config_dir = claude_env(pcfg, key, model)
     return run_claude(prompt, cwd, run_dir, name, model=model, env=env, config_dir=config_dir,
                       timeout_s=pcfg.get("timeout_s", 3600), max_budget=pcfg.get("max_budget_usd"),
-                      disallowed=["Agent", "Task"], setting_sources="user", bin_name=pcfg.get("bin", "claude"))
+                      disallowed=["Agent", "Task"], setting_sources="user", bin_name=pcfg.get("bin", "claude"),
+                      effort=pcfg.get("effort"))
 
 
 def verifier_model(cfg: dict) -> str:
@@ -817,8 +820,10 @@ def verifier_model(cfg: dict) -> str:
     return v.get("model") or cfg["providers"][v["provider"]]["models"][v.get("tier") or "pro"]
 
 
-def run_verifier(plan: str, cwd: Path, run_dir: Path, cfg: dict, secrets: dict, label: str = "verify") -> dict:
-    diff = git(cwd, "diff") + git(cwd, "diff", "--cached")
+def run_verifier(plan: str, cwd: Path, run_dir: Path, cfg: dict, secrets: dict, label: str = "verify",
+                 base: str | None = None) -> dict:
+    # Diffing against the run's starting commit keeps work the executor committed itself visible.
+    diff = git(cwd, "diff", base) if base else git(cwd, "diff") + git(cwd, "diff", "--cached")
     untracked = git(cwd, "ls-files", "--others", "--exclude-standard")
     if not diff.strip() and not untracked.strip():
         return {"ok": True, "structured": {"verdict": "incomplete", "missing": ["the repo has no changes"],
@@ -949,7 +954,7 @@ def run_costs(run_id: str) -> dict:
     paid = sub = 0.0
     unpriced = 0
     for e in ledger_read(3650):
-        if e.get("run_id") != run_id:
+        if e.get("run_id") != run_id or e.get("role") == "run":
             continue
         c = e.get("cost_usd")
         if c is None:
@@ -993,7 +998,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     log(f"run {run_id} · {' → '.join(cfg['chain'])} · verify: {'none' if verify_off else cfg['verify']['provider']}"
         + (f" · tier {tier}" if tier != "flash" else ""))
     summary = {"run_id": run_id, "cwd": str(cwd), "tier": tier, "plan": str(plan_path),
-               "status": "pending", "rounds": []}
+               "status": "pending", "rounds": [], "base": git(cwd, "rev-parse", "HEAD").strip() or None}
     findings = None
     if git(cwd, "status", "--porcelain").strip():
         log("warning: the working tree already had changes; the verifier will see them as part of the diff")
@@ -1019,7 +1024,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             summary["rounds"].append(rnd)
             break
         vpcfg, vmodel = cfg["providers"][vname], verifier_model(cfg)
-        vr = run_verifier(plan, cwd, run_dir / f"r{round_no}", cfg, secrets)
+        vr = run_verifier(plan, cwd, run_dir / f"r{round_no}", cfg, secrets, base=summary["base"])
         vr["tokens"] = norm_usage(vr.get("usage"))
         vcost = attempt_cost(vpcfg, vmodel, vr) if vr.get("usage") else (0.0 if vr.get("structured") else None)
         ledger_append({"ts": iso(now()), "run_id": run_id, "role": "verifier", "provider": vname, "model": vmodel,
@@ -1059,7 +1064,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         code = EXIT_VERIFY_PENDING
     else:
         code = EXIT_NOT_VERIFIED
-    changed = (git(cwd, "diff", "--name-only") + git(cwd, "ls-files", "--others", "--exclude-standard")).split()
+    changed = (git(cwd, "diff", "--name-only", *([summary["base"]] if summary["base"] else []))
+               + git(cwd, "ls-files", "--others", "--exclude-standard")).split()
+    # One outcome row per run, so `compare` can weigh executors by result and not only by spend.
+    done_by = [a["provider"] for r in summary["rounds"] for a in r["attempts"] if a.get("ok")]
+    ledger_append({"ts": iso(now()), "run_id": run_id, "role": "run", "provider": done_by[0] if done_by else None,
+                   "plan": str(plan_path), "tier": tier, "status": summary["status"],
+                   "rounds": len(summary["rounds"]), "files": len(changed), "seconds": summary["elapsed_s"]})
     emit(hook, "run_end", run_id=run_id, status=summary["status"], exit_code=code, report=str(report),
          files=changed, elapsed_s=summary["elapsed_s"], cost=summary["cost"])
     print()
@@ -1088,7 +1099,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if cooldown_left(vname):
         log(f"{vname} in cooldown {cooldown_left(vname) // 60} min")
         return EXIT_VERIFY_PENDING
-    vr = run_verifier(plan, cwd, run_dir, cfg, load_env(), label="verify-retry")
+    vr = run_verifier(plan, cwd, run_dir, cfg, load_env(), label="verify-retry", base=meta.get("base"))
     print(json.dumps(vr.get("structured") or {"reason": vr.get("reason")}, indent=1, ensure_ascii=False))
     return EXIT_OK if (vr.get("structured") or {}).get("verdict") == "ok" else EXIT_NOT_VERIFIED
 
@@ -1131,7 +1142,7 @@ def cmd_status(_: argparse.Namespace) -> int:
 
 
 def usage_summary(days: int) -> tuple[str, dict]:
-    rows = ledger_read(days)
+    rows = [e for e in ledger_read(days) if e.get("role") != "run"]  # run rows are outcomes, not calls
     agg: dict[str, dict] = {}
     for e in rows:
         a = agg.setdefault(e["provider"], {"calls": 0, "input": 0, "cached": 0, "output": 0, "cost": 0.0,
@@ -1152,6 +1163,49 @@ def usage_summary(days: int) -> tuple[str, dict]:
                      f"{a['output']:,} out · ${a['cost']:.4f} {unit}")
     lines.append(f"Total paid: ${paid:.4f}")
     return "\n".join(lines), {k: {**v, "runs": len(v["runs"])} for k, v in agg.items()}
+
+
+def compare_summary(days: int) -> tuple[str, dict]:
+    """Executors side by side: outcome per run plus what each run cost to execute and to verify."""
+    rows = ledger_read(days)
+    spend: dict[str, dict] = {}
+    for e in rows:
+        if e.get("role") in ("executor", "verifier"):
+            r = spend.setdefault(e["run_id"], {"executor": 0.0, "verifier": 0.0, "tokens_out": 0})
+            r[e["role"]] += e.get("cost_usd") or 0.0
+            if e["role"] == "executor":
+                r["tokens_out"] += e.get("output", 0)
+    agg: dict[str, dict] = {}
+    for e in rows:
+        if e.get("role") != "run":
+            continue
+        a = agg.setdefault(e.get("provider") or "none", {"runs": 0, "ok": 0, "rounds": 0, "seconds": [],
+                                                         "executor_usd": 0.0, "verifier_usd": 0.0, "tokens_out": 0})
+        sp = spend.get(e["run_id"], {})
+        a["runs"] += 1
+        a["ok"] += e.get("status") == "verified OK"
+        a["rounds"] += e.get("rounds", 0)
+        a["seconds"].append(e.get("seconds", 0))
+        a["executor_usd"] += sp.get("executor", 0.0)
+        a["verifier_usd"] += sp.get("verifier", 0.0)
+        a["tokens_out"] += sp.get("tokens_out", 0)
+    lines = [f"execute-cheaper compare · last {days} days",
+             "| executor | runs | verified OK | rounds/run | median s | executor $ | verifier $ | out tokens |",
+             "|---|---|---|---|---|---|---|---|"]
+    for name, a in sorted(agg.items()):
+        secs = sorted(a["seconds"])
+        a["median_s"] = secs[len(secs) // 2] if secs else 0
+        lines.append(f"| {name} | {a['runs']} | {a['ok']}/{a['runs']} | {a['rounds'] / a['runs']:.1f} | {a['median_s']} "
+                     f"| {a['executor_usd']:.3f} | {a['verifier_usd']:.3f} | {a['tokens_out']} |")
+        del a["seconds"]
+    lines.append("Executor $ for subscription providers is Claude Code's pay-as-you-go equivalent, not money spent.")
+    return "\n".join(lines), agg
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    text, agg = compare_summary(args.days)
+    print(json.dumps(agg, indent=1) if args.json else text)
+    return EXIT_OK
 
 
 def cmd_usage(args: argparse.Namespace) -> int:
@@ -1225,6 +1279,10 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--days", type=int, default=7)
     u.add_argument("--json", action="store_true")
     u.set_defaults(func=cmd_usage)
+    cp = sub.add_parser("compare", help="executors side by side: verified runs, rounds, time and cost")
+    cp.add_argument("--days", type=int, default=7)
+    cp.add_argument("--json", action="store_true")
+    cp.set_defaults(func=cmd_compare)
     c = sub.add_parser("cooldown", help="set or clear a provider cooldown by hand")
     c.add_argument("provider")
     c.add_argument("--minutes", type=int, default=60)

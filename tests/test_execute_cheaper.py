@@ -48,6 +48,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         badjson) echo "Traceback: something exploded" ; exit 0 ;;
       esac
       echo "done via ${ANTHROPIC_BASE_URL:-login}" > cheap-was-here.txt
+      [ "${FAKE_EXEC:-ok}" = commit ] && git add cheap-was-here.txt && git -c user.name=t -c user.email=t@t commit -qm exec
       echo '{"type":"result","is_error":false,"result":"files changed: cheap-was-here.txt","total_cost_usd":0.5,"usage":{"input_tokens":100,"output_tokens":20}}'
     else
       if [ "${FAKE_VERDICT:-ok}" = "quota" ]; then echo '{"is_error":true,"result":"You have hit your usage limit. Resets at 17:30"}'; exit 1; fi
@@ -269,6 +270,17 @@ class CheapExecTest(unittest.TestCase):
         self.assertIn("## Round 2", r.stdout)
         self.assertIn("verification: incomplete", r.stdout)
 
+    def test_executor_commit_still_reaches_verifier(self):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base"],
+                       cwd=self.repo, check=True)
+        r = self.run_cli("run", "--plan", "PLAN.md", "--chain", "cheapapi", extra_env={"FAKE_EXEC": "commit"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True,
+                                        text=True).stdout, "")
+        run_dir = next((self.state / "runs").iterdir())
+        self.assertIn("cheap-was-here.txt", (run_dir / "r1" / "verify-prompt.md").read_text())
+        self.assertEqual([row["files"] for row in self.ledger() if row["role"] == "run"], [1])
+
     def test_verifier_is_read_only_and_isolated(self):
         log_path = self.tmp / "args.log"
         self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_ARGS_LOG": str(log_path)})
@@ -468,6 +480,33 @@ class CheapExecTest(unittest.TestCase):
         self.assertIn("Cost: $0.0030 paid", r.stdout)
         u = self.run_cli("usage", "--days", "1", "--json")
         self.assertEqual(json.loads(u.stdout)["cheapapi"]["calls"], 1)
+
+    def test_login_executor_passes_effort_and_compare_reports_outcome(self):
+        self.config["providers"]["haiku"] = {"kind": "claude", "use_login": True, "effort": "high",
+                                             "models": {"flash": "claude-haiku-5-5", "pro": "claude-haiku-5-5"},
+                                             "timeout_s": 60, "billing": "subscription"}
+        self.config["chain"] = ["haiku"]
+        self.save_config()
+        args_log = self.tmp / "args.log"
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_ARGS_LOG": str(args_log)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        executor_call = args_log.read_text().splitlines()[0]
+        self.assertIn("--model claude-haiku-5-5", executor_call)
+        self.assertIn("--effort high", executor_call)
+        run_row = next(e for e in self.ledger() if e["role"] == "run")
+        self.assertEqual((run_row["provider"], run_row["status"], run_row["rounds"]), ("haiku", "verified OK", 1))
+        c = self.run_cli("compare", "--days", "1", "--json")
+        agg = json.loads(c.stdout)["haiku"]
+        self.assertEqual((agg["runs"], agg["ok"]), (1, 1))
+        self.assertAlmostEqual(agg["executor_usd"], 0.5)  # Claude Code's own figure for a login executor
+        self.assertIn("| haiku | 1 | 1/1 |", self.run_cli("compare", "--days", "1").stdout)
+
+    def test_executor_without_effort_gets_no_flag(self):
+        self.config["chain"] = ["cheapapi"]
+        self.save_config()
+        args_log = self.tmp / "args.log"
+        self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_ARGS_LOG": str(args_log)})
+        self.assertNotIn("--effort", args_log.read_text())
 
     def test_peak_multiplier(self):
         pcfg = {"prices": {"m": [1.0, 0.0, 0.0]}, "peak": {"multiplier": 2.0, "utc_hours": [[1, 4]], "weekdays_only": True}}
