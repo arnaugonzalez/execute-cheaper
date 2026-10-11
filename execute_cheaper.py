@@ -845,7 +845,8 @@ def run_verifier(plan: str, cwd: Path, run_dir: Path, cfg: dict, secrets: dict, 
     return run_claude(prompt, cwd, run_dir, label, model=model, env=env, config_dir=config_dir,
                       timeout_s=cfg["verify"].get("timeout_s", 1800),
                       disallowed=["Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task", "Skill"],
-                      json_schema=VERIFY_SCHEMA, setting_sources="", bin_name=pcfg.get("bin", "claude"))
+                      json_schema=VERIFY_SCHEMA, setting_sources="", bin_name=pcfg.get("bin", "claude"),
+                      effort=pcfg.get("effort"))
 
 
 # --- orchestration ----------------------------------------------------------
