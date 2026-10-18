@@ -80,7 +80,8 @@ and repeating the same `--chain`/`--verify` is a no-op.
 
 ### Set it up from your agent
 
-Claude Code, Codex or any agent with a shell can do the whole setup in your chat. Paste this:
+Claude Code, Codex or any agent with a shell can do the whole setup in your chat (tried with Claude Haiku
+and with `codex exec`, each in a scratch config directory). Paste this:
 
 ```text
 Install execute-cheaper (pipx install execute-cheaper) and set it up for me by following
@@ -92,7 +93,8 @@ chat: tell me the file and the variable name and I will paste it there myself.
 
 The JSON from `init --detect --json` and `status --json` is versioned (`"schema": 1`) and holds key
 names and where they are set (`env`, `.env` or `null`), never their values. With the plugin below,
-`/execute-cheaper:setup` runs the same flow.
+`/execute-cheaper:setup` runs the same flow. Cline and other agents that look for
+[`llms-install.md`](llms-install.md) get the short version there.
 
 ### From Claude Code
 

@@ -759,6 +759,15 @@ class InitTest(unittest.TestCase):
         self.assertIn("cursor [cli]: cursor-agent ok", text)
         self.assertIn("opencode [cli]: opencode ok", text)
 
+    def test_llms_install_matches_agents_md(self):
+        short, full = (ROOT / "llms-install.md").read_text(), (ROOT / "AGENTS.md").read_text()
+        for text in (short, full):
+            for needle in ("init --detect --json", "init --chain", "status --json", "keys_to_fill", "never"):
+                self.assertIn(needle, text.lower() if needle == "never" else text)
+        for name in ce.OPT_IN:  # every opt-in route is named, so agents relay its note
+            self.assertIn(f"`{name}`", short)
+            self.assertIn(f"`{name}`", full)
+
     def test_verifier_defaults_to_another_family(self):
         self.fake("codex", "claude")
         self.assertEqual(self.detect()["suggested"], {"chain": ["codex"], "verify": "claude-login"})
