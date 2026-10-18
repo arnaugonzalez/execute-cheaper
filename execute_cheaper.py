@@ -119,6 +119,9 @@ EXAMPLE_CONFIG: dict = {
             "timeout_s": 3600,
             "billing": "paid",
             "prices": {"deepseek-flash": [0.15, 0.003, 0.60], "deepseek-v4-pro": [0.66, 0.022, 1.98]},
+            # Search/Fetch, USD per successful call; free through Claude Code until 2026-11-01 00:00 Beijing time
+            "tool_prices": {"web_search_requests": 0.00075, "web_fetch_requests": 0.00075},
+            "tool_prices_since": "2026-10-31T16:00:00+00:00",
             "peak": {"multiplier": 2.0, "utc_hours": [[1, 4], [6, 10]], "weekdays_only": True},
         },
         "zai": {
@@ -332,7 +335,19 @@ def estimate_cost(pcfg: dict, model: str, usage: dict | None, when: dt.datetime 
     mult = float(pcfg["peak"].get("multiplier", 1.0)) if in_peak(pcfg.get("peak"), when or now()) else 1.0
     n = norm_usage(usage)
     written = int((usage or {}).get("cache_creation_input_tokens", 0) or 0)
-    return mult * (n["input"] * pin + written * (pwrite - pin) + n["cached"] * pcached + n["output"] * pout) / 1e6
+    tokens = mult * (n["input"] * pin + written * (pwrite - pin) + n["cached"] * pcached + n["output"] * pout) / 1e6
+    return tokens + tool_cost(pcfg, usage, when or now())
+
+
+def tool_cost(pcfg: dict, usage: dict | None, when: dt.datetime) -> float:
+    """USD of the provider's server-side tools (web search/fetch) counted in usage.server_tool_use.
+    Prices are per call and not subject to the peak multiplier; nothing is charged before tool_prices_since."""
+    prices = pcfg.get("tool_prices") or {}
+    since = pcfg.get("tool_prices_since")
+    if not prices or (since and when < dt.datetime.fromisoformat(since)):
+        return 0.0
+    used = (usage or {}).get("server_tool_use") or {}
+    return sum(int(used.get(k, 0) or 0) * float(price) for k, price in prices.items())
 
 
 def attempt_cost(pcfg: dict, model: str, res: dict) -> float | None:

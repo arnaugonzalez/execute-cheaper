@@ -517,6 +517,18 @@ class CheapExecTest(unittest.TestCase):
         self.assertEqual(ce.estimate_cost(pcfg, "m", usage, saturday_peak), 1.0)
         self.assertIsNone(ce.estimate_cost(pcfg, "unknown-model", usage, monday_peak))
 
+    def test_server_tool_calls_priced_after_since_and_without_peak(self):
+        pcfg = {"prices": {"m": [0.0, 0.0, 0.0]}, "peak": {"multiplier": 2.0, "utc_hours": [[1, 4]]},
+                "tool_prices": {"web_search_requests": 0.001, "web_fetch_requests": 0.002},
+                "tool_prices_since": "2026-10-31T16:00:00+00:00"}
+        usage = {"server_tool_use": {"web_search_requests": 3, "web_fetch_requests": 1}}
+        free = ce.dt.datetime(2026, 10, 31, 15, 59, tzinfo=ce.dt.timezone.utc)
+        billed_peak = ce.dt.datetime(2026, 11, 2, 2, tzinfo=ce.dt.timezone.utc)
+        self.assertEqual(ce.estimate_cost(pcfg, "m", usage, free), 0.0)
+        self.assertAlmostEqual(ce.estimate_cost(pcfg, "m", usage, billed_peak), 0.005)
+        self.assertEqual(ce.estimate_cost(pcfg, "m", {"input_tokens": 0}, billed_peak), 0.0)
+        self.assertTrue(ce.EXAMPLE_CONFIG["providers"]["deepseek"]["tool_prices"])
+
     # --- config, guards, hooks --------------------------------------------
 
     def test_unknown_provider_is_a_readable_config_error(self):

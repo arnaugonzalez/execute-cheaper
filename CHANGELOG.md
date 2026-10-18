@@ -12,6 +12,8 @@ First public release.
   preset; Gemini CLI and `cursor-agent` ship untested in `examples/providers/`.
 - `cli` adapter `output: "jsonl"` for event-stream CLIs (usage summed over every event) and `cost_field`
   for the cost a CLI reports itself; tested opencode preset, plus presets for the Z.ai and MiniMax coding plans.
+- Server-side tool calls (`usage.server_tool_use`) priced per call via `tool_prices`, starting at
+  `tool_prices_since`; the DeepSeek preset bills Search/Fetch at $0.00075 from 2026-11-01 (Beijing).
 - Provider chain with cooldowns persisted across runs; `agy` watchdog for quota hangs.
 - Independent read-only verifier (Claude Code or Codex) with a JSON Schema verdict and automatic repair rounds.
 - Cost ledger (`usage`), per-run `report.md`, exit codes 0/1/2/3.
