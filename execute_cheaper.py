@@ -57,11 +57,11 @@ DEFAULT_CONFIG: dict = {
     "providers": {},
 }
 
-# Written by `execute-cheaper init` and kept in sync with config.example.json (a test checks it).
+# Every built-in preset; `init` writes only the ones the user picks. Kept in sync with config.example.json (a test checks it).
 # Prices: USD per 1M tokens [input, cached input, output(, cache write)], as listed by each provider on prices_as_of.
 # Cache writes default to the input price; Anthropic models charge 1.25x input for them.
 EXAMPLE_CONFIG: dict = {
-    "chain": ["codex", "copilot", "agy", "openrouter"],
+    "chain": ["codex", "copilot", "openrouter"],
     "verify": {"provider": "claude-login", "tier": "pro", "timeout_s": 1800},
     "max_rounds": 2,
     "on_event": None,
@@ -1122,16 +1122,47 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return EXIT_OK if (vr.get("structured") or {}).get("verdict") == "ok" else EXIT_NOT_VERIFIED
 
 
-def cmd_status(_: argparse.Namespace) -> int:
+def route_problems(cfg: dict, secrets: dict) -> list[str]:
+    """Chain or verifier providers that can't run as configured: missing CLI or key."""
+    out = []
+    vp = (cfg.get("verify") or {}).get("provider")
+    for role, names in (("chain", cfg.get("chain") or []), ("verifier", [vp] if vp else [])):
+        for name in names:
+            p = (cfg.get("providers") or {}).get(name)
+            if p:
+                missing = route_check(p, secrets)["missing"]
+                if missing:
+                    out.append(f"{role} provider '{name}' can't run yet: {', '.join(missing)}")
+    return out
+
+
+def cmd_status(args: argparse.Namespace) -> int:
     cfg = load_config()
     secrets = load_env()
+    errs = validate_config(cfg)
+    problems = route_problems(cfg, secrets)
+    vp = cfg["verify"].get("provider")
+    used = set(cfg["chain"]) | ({vp} if vp else set())
+    if getattr(args, "json", False):
+        providers = []
+        for name, p in (cfg.get("providers") or {}).items():
+            c = route_check(p, secrets)
+            providers.append({"name": name, "kind": p.get("kind"), "in_chain": name in cfg["chain"],
+                              "verifier": name == vp, "ready": c["ready"], "missing": c["missing"],
+                              "cli": c["cli"], "key_env": c["key_env"],
+                              "key_source": key_source(c["key_env"], secrets), "cooldown_s": cooldown_left(name)})
+        runnable = any(p["ready"] for p in providers if p["in_chain"]) and \
+            (not vp or any(p["ready"] for p in providers if p["verifier"]))
+        print(json.dumps({"schema": DETECT_SCHEMA, "config_path": str(CONFIG_PATH), "config_exists": CONFIG_PATH.exists(),
+                          "env_path": str(ENV_PATH), "chain": cfg["chain"], "verify": vp, "providers": providers,
+                          "problems": problems, "errors": errs, "ready": runnable and not errs}, indent=1))
+        return EXIT_CONFIG if errs else EXIT_OK
     print(f"config: {CONFIG_PATH} ({'found' if CONFIG_PATH.exists() else 'missing — run `execute-cheaper init`'})")
     print(f"keys:   {ENV_PATH} ({'found' if ENV_PATH.exists() else 'missing'}) + environment")
     print(f"state:  {STATE_DIR}")
-    print(f"chain: {cfg['chain']} · verifier: {cfg['verify'].get('provider') or 'none'} · rounds: {cfg['max_rounds']}")
-    used = set(cfg["chain"]) | ({cfg["verify"]["provider"]} if cfg["verify"].get("provider") else set())
+    print(f"chain: {cfg['chain']} · verifier: {vp or 'none'} · rounds: {cfg['max_rounds']}")
     for name, p in (cfg.get("providers") or {}).items():
-        binary = p.get("bin") or (p["cmd"][0] if p.get("kind") == "cli" and p.get("cmd") else p.get("kind"))
+        binary = provider_binary(p)
         if p.get("use_login"):
             auth = "own Claude Code login"
         elif p.get("kind") in ("codex", "agy") or (p.get("kind") == "cli" and not p.get("key_env")):
@@ -1146,7 +1177,8 @@ def cmd_status(_: argparse.Namespace) -> int:
         mark = "*" if name in used else " "
         print(f" {mark} {name} [{p.get('kind')}]: {binary} {'ok' if shutil.which(binary) else 'NOT FOUND'} · {auth}"
               + (f" · cooldown {left // 60} min" if left else ""))
-    errs = validate_config(cfg)
+    for w in problems:
+        print(f"warning: {w}")
     for e in errs:
         print(f"config error: {e}")
     print(usage_summary(7)[0])
@@ -1244,38 +1276,296 @@ def cmd_cooldown(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def cmd_init(args: argparse.Namespace) -> int:
-    """Create config, key template and the isolated Claude Code profile used by executors. Idempotent."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    if CONFIG_PATH.exists() and not args.force:
-        print(f"kept {CONFIG_PATH} (use --force to overwrite)")
-    else:
-        CONFIG_PATH.write_text(json.dumps(EXAMPLE_CONFIG, indent=2) + "\n", encoding="utf-8")
-        print(f"wrote {CONFIG_PATH}")
-    if not ENV_PATH.exists():
-        keys = sorted({p["key_env"] for p in EXAMPLE_CONFIG["providers"].values() if p.get("key_env")})
-        ENV_PATH.write_text("# API keys for execute-cheaper providers (KEY=value, no export).\n"
-                            + "".join(f"{k}=\n" for k in keys), encoding="utf-8")
-        print(f"wrote {ENV_PATH} — fill in the key(s) for the providers in your chain")
+# --- init: the routes each user picks --------------------------------------
+
+# Built-in presets `init` can offer (EXAMPLE_CONFIG providers): vendor family and a one-line description.
+# The family keeps the default verifier out of the executor's own family.
+ROUTE_INFO: dict[str, tuple[str, str]] = {
+    "codex": ("openai", "Codex CLI on your ChatGPT login"),
+    "copilot": ("github", "GitHub Copilot CLI on your Copilot plan"),
+    "agy": ("google", "Google Antigravity CLI on your Google plan"),
+    "openrouter": ("openrouter", "Claude Code on OpenRouter (DeepSeek, GLM...), API key"),
+    "deepseek": ("deepseek", "Claude Code on the DeepSeek API, API key"),
+    "zai": ("zai", "Claude Code on the Z.ai GLM API, API key"),
+    "anthropic": ("anthropic", "Claude Code on an Anthropic API key"),
+    "claude-login": ("anthropic", "your own Claude Code login (subscription)"),
+    "ollama": ("local", "Claude Code on a local model server"),
+}
+# Offered, never picked by default.
+OPT_IN: dict[str, str] = {
+    "agy": "opt-in: Google's Antigravity terms restrict use with third-party tools; read them before you script it",
+    "ollama": "opt-in: needs a server at http://localhost:11434 (Ollama, LM Studio, vLLM, llama.cpp, LiteLLM)",
+}
+VERIFIER_PREFERENCE = ("claude-login", "codex", "anthropic")
+DETECT_SCHEMA = 1
+
+
+def provider_binary(p: dict) -> str:
+    if p.get("bin"):
+        return p["bin"]
+    if p.get("kind") == "cli" and p.get("cmd"):
+        return p["cmd"][0]
+    return p.get("kind") or "?"
+
+
+def key_source(name: str | None, secrets: dict) -> str | None:
+    """Where a key is set: 'env', '.env' or None. Never the value."""
+    if not name:
+        return None
+    if os.environ.get(name):
+        return "env"
+    return ".env" if secrets.get(name) else None
+
+
+def route_check(p: dict, secrets: dict) -> dict:
+    binary = provider_binary(p)
+    missing = [] if shutil.which(binary) else [f"no `{binary}` CLI"]
+    if p.get("key_env") and not key_source(p["key_env"], secrets):
+        missing.append(f"no {p['key_env']}")
+    return {"cli": binary, "key_env": p.get("key_env"), "ready": not missing, "missing": missing}
+
+
+def suggest_verifier(chain: list[str], candidates: list[str]) -> str | None:
+    """First verifier-capable candidate outside the chain's families; else the first one; else None."""
+    providers = EXAMPLE_CONFIG["providers"]
+    ok = [n for n in candidates if providers.get(n, {}).get("kind") in VERIFIER_KINDS and n not in OPT_IN]
+    ok.sort(key=lambda n: VERIFIER_PREFERENCE.index(n) if n in VERIFIER_PREFERENCE else len(VERIFIER_PREFERENCE))
+    families = {ROUTE_INFO.get(n, (n,))[0] for n in chain}
+    return next((n for n in ok if ROUTE_INFO.get(n, (n,))[0] not in families), ok[0] if ok else None)
+
+
+def detect(secrets: dict) -> dict:
+    """What `init` can offer on this machine. Stable JSON (`init --detect --json`); key names, never values."""
+    routes = []
+    for name, p in EXAMPLE_CONFIG["providers"].items():
+        family, about = ROUTE_INFO.get(name, (name, ""))
+        routes.append({"name": name, "kind": p["kind"], "family": family, "billing": p.get("billing"),
+                       "about": about, "can_verify": p["kind"] in VERIFIER_KINDS, "opt_in": name in OPT_IN,
+                       "note": OPT_IN.get(name), **route_check(p, secrets)})
+    ready = [r["name"] for r in routes if r["ready"]]
+    chain = [n for n in ready if n not in OPT_IN and n != "claude-login"] or [n for n in ready if n == "claude-login"]
+    clis = sorted({r["cli"] for r in routes})
+    keys = sorted({r["key_env"] for r in routes if r["key_env"]})
+    return {
+        "schema": DETECT_SCHEMA,
+        "config_path": str(CONFIG_PATH),
+        "config_exists": CONFIG_PATH.exists(),
+        "env_path": str(ENV_PATH),
+        "clis": {c: bool(shutil.which(c)) for c in clis},
+        "keys": {k: key_source(k, secrets) for k in keys},
+        "routes": routes,
+        "suggested": {"chain": chain, "verify": suggest_verifier(chain, ready)},
+        "warnings": [f"{n}: {note}" for n, note in OPT_IN.items()],
+    }
+
+
+def detect_table(found: dict) -> str:
+    lines = ["  #  route         status                       what it is"]
+    for i, r in enumerate(found["routes"], 1):
+        status = "ready" if r["ready"] else ", ".join(r["missing"])
+        if r["opt_in"]:
+            status += " · opt-in"
+        lines.append(f"  {i:<2} {r['name']:<13} {status:<28} {r['about']}")
+    lines += [f"  note {w}" for w in found["warnings"]]
+    lines.append("  more CLIs (opencode, cursor-agent, Gemini CLI): presets in the repo's examples/providers/")
+    return "\n".join(lines)
+
+
+def parse_routes(answer: str, names: list[str]) -> list[str]:
+    """'1,codex' -> ['copilot'...]: names or 1-based numbers from the detection table."""
+    out = []
+    for tok in (t.strip() for t in answer.split(",")):
+        if not tok:
+            continue
+        if tok.isdigit() and 1 <= int(tok) <= len(names):
+            tok = names[int(tok) - 1]
+        if tok not in names:
+            raise ConfigError(f"unknown route '{tok}' (choose from: {', '.join(names)})")
+        if tok not in out:
+            out.append(tok)
+    return out
+
+
+def ask(prompt: str, default: str, parse):
+    while True:
+        try:
+            answer = input(f"{prompt} [{default or 'none'}]: ").strip()
+        except EOFError as e:
+            raise ConfigError("init cancelled: no answer on stdin (or pass --yes / --chain)") from e
+        try:
+            return parse(answer or default)
+        except ConfigError as e:
+            print(f"  {e}")
+
+
+def ask_routes(found: dict) -> tuple[list[str], str | None]:
+    """Interactive init: the detection table, then the chain and the verifier, with defaults."""
+    names = [r["name"] for r in found["routes"]]
+    ready = [r["name"] for r in found["routes"] if r["ready"]]
+    print("execute-cheaper init: pick the routes your plans run on.\n")
+    print(detect_table(found) + "\n")
+
+    def pick_chain(answer: str) -> list[str]:
+        chain = parse_routes(answer, names)
+        errs = check_choice(chain, None, found)[0]
+        if errs:
+            raise ConfigError("; ".join(errs))
+        return chain
+
+    chain = ask("Executors, in order (names or numbers, comma-separated)", ",".join(found["suggested"]["chain"]),
+                pick_chain)
+
+    def pick_verifier(answer: str) -> str | None:
+        if answer == "none":
+            return None
+        verify = (parse_routes(answer, names) or [None])[0]
+        errs = check_choice(chain, verify, found)[0]
+        if errs:
+            raise ConfigError("; ".join(errs))
+        return verify
+
+    return chain, ask("Verifier (a claude or codex route, or none)", suggest_verifier(chain, ready) or "none",
+                      pick_verifier)
+
+
+def check_choice(chain: list[str], verify: str | None, found: dict) -> tuple[list[str], list[str]]:
+    """(errors, warnings) for a chosen chain + verifier."""
+    routes = {r["name"]: r for r in found["routes"]}
+    errs, warns = [], []
+    if not chain:
+        errs.append("no executor chosen")
+    for n in chain + ([verify] if verify else []):
+        r = routes.get(n)
+        if r is None:
+            errs.append(f"unknown route '{n}' (choose from: {', '.join(routes)})")
+        elif any(m.endswith(" CLI") for m in r["missing"]):
+            errs.append(f"{n}: {', '.join(r['missing'])}: install it or leave it out")
+        elif r["missing"]:
+            warns.append(f"{n}: {', '.join(r['missing'])} yet: put it in {ENV_PATH} or the environment")
+    if verify and verify in routes and not routes[verify]["can_verify"]:
+        errs.append(f"verifier '{verify}' must be a claude or codex route (the verdict needs a JSON schema)")
+    if verify and verify in routes and routes[verify]["family"] in {routes[n]["family"] for n in chain if n in routes}:
+        warns.append(f"verifier '{verify}' is in the same family as an executor: it may go easy on its own work")
+    return errs, warns
+
+
+def build_config(chain: list[str], verify: str | None) -> dict:
+    cfg = json.loads(json.dumps(EXAMPLE_CONFIG))
+    keep = set(chain) | ({verify} if verify else set())
+    cfg["chain"] = chain
+    cfg["verify"]["provider"] = verify
+    cfg["providers"] = {n: p for n, p in cfg["providers"].items() if n in keep}
+    return cfg
+
+
+def write_env_template(cfg: dict, secrets: dict) -> list[str]:
+    """Add an empty KEY= line for each key the chosen routes need and nobody has set. Returns those names."""
+    needed = sorted({p["key_env"] for p in cfg["providers"].values()
+                     if p.get("key_env") and not key_source(p["key_env"], secrets)})
+    text = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else \
+        "# API keys for execute-cheaper providers (KEY=value, no export).\n"
+    listed = {ln.split("=", 1)[0].strip() for ln in text.splitlines() if "=" in ln and not ln.lstrip().startswith("#")}
+    add = [k for k in needed if k not in listed]
+    if add or not ENV_PATH.exists():
+        ENV_PATH.write_text(text + ("" if text.endswith("\n") else "\n") + "".join(f"{k}=\n" for k in add),
+                            encoding="utf-8")
     ENV_PATH.chmod(0o600)
+    return needed
+
+
+def write_profile(force: bool) -> None:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     settings = PROFILE_DIR / "settings.json"
-    if not settings.exists() or args.force:
+    if not settings.exists() or force:
         settings.write_text(json.dumps(executor_profile_settings(), indent=2) + "\n", encoding="utf-8")
     onboarding = PROFILE_DIR / ".claude.json"
     if not onboarding.exists():
         # Skip Claude Code's interactive first-run screens in -p mode.
         onboarding.write_text('{"hasCompletedOnboarding": true}\n', encoding="utf-8")
     (PROFILE_DIR / "CLAUDE.md").write_text(EXECUTOR_PROFILE_CLAUDE_MD, encoding="utf-8")
-    print(f"executor profile: {PROFILE_DIR}")
-    return EXIT_OK
+
+
+def init_result(args: argparse.Namespace, code: int, **data) -> int:
+    if args.json:
+        print(json.dumps({"ok": code == EXIT_OK, "config_path": str(CONFIG_PATH), "env_path": str(ENV_PATH), **data},
+                         indent=1))
+    else:
+        for w in data.get("warnings") or []:
+            print(f"warning: {w}")
+        for e in data.get("errors") or []:
+            print(f"execute-cheaper init: {e}", file=sys.stderr)
+    return code
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """Detect the CLIs and keys on this machine, let the user pick the chain and the verifier, write only
+    those providers, the .env lines they need and the isolated Claude Code profile. Idempotent."""
+    secrets = load_env()
+    found = detect(secrets)
+    if args.detect:
+        print(json.dumps(found, indent=1) if args.json else detect_table(found))
+        return EXIT_OK
+    names = [r["name"] for r in found["routes"]]
+    ready = [r["name"] for r in found["routes"] if r["ready"]]
+    sug = found["suggested"]
+    explicit = args.chain is not None or args.verify is not None
+    if explicit:
+        try:
+            chain = parse_routes(args.chain, names) if args.chain is not None else sug["chain"]
+            verify = None if args.verify == "none" else \
+                parse_routes(args.verify, names)[0] if args.verify else suggest_verifier(chain, ready)
+        except (ConfigError, IndexError) as e:
+            return init_result(args, EXIT_CONFIG, written=False, errors=[str(e) or "empty --verify"])
+    if CONFIG_PATH.exists() and not args.force:
+        current = load_config()
+        cur_verify = (current.get("verify") or {}).get("provider")
+        if explicit and (current.get("chain") != chain or cur_verify != verify):
+            return init_result(args, EXIT_CONFIG, written=False, errors=[
+                f"{CONFIG_PATH} exists with chain {current.get('chain')} and verifier {cur_verify}: "
+                "pass --force to replace it"])
+        write_profile(False)
+        if not args.json:
+            print(f"kept {CONFIG_PATH} (use --force to overwrite)")
+        return init_result(args, EXIT_OK, written=False, chain=current.get("chain"), verify=cur_verify)
+    if not explicit:
+        if not sug["chain"]:
+            return init_result(args, EXIT_CONFIG, written=False, errors=[
+                "nothing usable found: install codex, copilot or claude (Claude Code), or set one of "
+                f"{', '.join(found['keys'])} in the environment or {ENV_PATH}, then run init again"])
+        if not args.yes and not args.json and sys.stdin.isatty():
+            chain, verify = ask_routes(found)
+        else:
+            chain, verify = sug["chain"], sug["verify"]
+            if not args.yes and not args.json:
+                print("no terminal: using the detected routes (choose with --chain/--verify; --yes silences this)")
+    errs, warns = check_choice(chain, verify, found)
+    if errs:
+        return init_result(args, EXIT_CONFIG, written=False, errors=errs, warnings=warns)
+    if verify is None:
+        warns.append("no verifier: `run` needs --verify none until you add a claude or codex route")
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = build_config(chain, verify)
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    keys = write_env_template(cfg, secrets)
+    write_profile(args.force)
+    if not args.json:
+        print(f"wrote {CONFIG_PATH}: chain {' → '.join(chain)} · verifier {verify or 'none'}")
+        for k in keys:
+            print(f"fill {k} in {ENV_PATH} (or export it), then check with `execute-cheaper status`")
+        print(f"executor profile: {PROFILE_DIR}")
+    return init_result(args, EXIT_OK, written=True, chain=chain, verify=verify, keys_to_fill=keys, warnings=warns)
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="execute-cheaper", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"execute-cheaper {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
-    i = sub.add_parser("init", help="create config, .env template and the executor profile")
+    i = sub.add_parser("init", help="detect your CLIs and keys, pick the chain and verifier, write the config")
+    i.add_argument("--detect", action="store_true", help="only print what was found (writes nothing)")
+    i.add_argument("--chain", default=None, help="comma-separated executor routes, in order (skips the questions)")
+    i.add_argument("--verify", default=None, help="verifier route, or 'none' (default: one from another family)")
+    i.add_argument("--yes", action="store_true", help="accept the detected chain and verifier without asking")
+    i.add_argument("--json", action="store_true", help="machine-readable output (for agents)")
     i.add_argument("--force", action="store_true", help="overwrite an existing config.json")
     i.set_defaults(func=cmd_init)
     r = sub.add_parser("run", help="execute a plan along the provider chain, then verify")
@@ -1292,6 +1582,7 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--cwd", default=None)
     v.set_defaults(func=cmd_verify)
     s = sub.add_parser("status", help="providers, keys, cooldowns and recent runs")
+    s.add_argument("--json", action="store_true", help="machine-readable output (key names, never values)")
     s.set_defaults(func=cmd_status)
     u = sub.add_parser("usage", help="tokens and cost per provider from the ledger")
     u.add_argument("--days", type=int, default=7)

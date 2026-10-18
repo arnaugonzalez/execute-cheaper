@@ -1,4 +1,5 @@
 """execute-cheaper tests with fake `agy`, `claude` and `codex` binaries: no network, no keys, no quota spent."""
+import io
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "execute_cheaper.py"
@@ -580,14 +582,17 @@ class CheapExecTest(unittest.TestCase):
     def test_init_is_idempotent_and_private(self):
         shutil.rmtree(self.cfg)
         for _ in range(2):
-            r = self.run_cli("init")
-            self.assertEqual(r.returncode, 0, r.stderr)
+            r = self.run_cli("init", "--chain", "codex,openrouter", "--verify", "claude-login")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(stat.S_IMODE((self.cfg / ".env").stat().st_mode), 0o600)
-        self.assertEqual(json.loads((self.cfg / "config.json").read_text()), ce.EXAMPLE_CONFIG)
+        cfg = json.loads((self.cfg / "config.json").read_text())
+        self.assertEqual(cfg["chain"], ["codex", "openrouter"])
+        self.assertEqual(sorted(cfg["providers"]), ["claude-login", "codex", "openrouter"])
         settings = json.loads((self.state / "claude-profile" / "settings.json").read_text())
         self.assertIn(f"Read({self.cfg}/**)", settings["permissions"]["deny"])
         s = self.run_cli("status")
         self.assertIn("OPENROUTER_API_KEY MISSING", s.stdout)
+        self.assertIn("chain provider 'openrouter' can't run yet: no OPENROUTER_API_KEY", s.stdout)
 
     def test_example_config_matches_and_validates(self):
         self.assertEqual(json.loads((ROOT / "config.example.json").read_text()), ce.EXAMPLE_CONFIG)
@@ -626,11 +631,194 @@ class CheapExecTest(unittest.TestCase):
         self.assertEqual(manifest["version"], ce.__version__)  # bump both together
         skill = (plugin_dir / "skills" / "execute-cheaper" / "SKILL.md").read_text()
         self.assertTrue(skill.startswith("---\nname: execute-cheaper\n"))
+        setup = (plugin_dir / "skills" / "setup" / "SKILL.md").read_text()
+        self.assertTrue(setup.startswith("---\nname: setup\n"))
+        for doc in (setup, (ROOT / "AGENTS.md").read_text()):
+            for cmd in ("init --detect --json", "init --chain", "status --json"):
+                self.assertIn(cmd, doc)
 
     def test_parse_reset(self):
         self.assertEqual(ce.parse_reset("3h6m37s"), 3 * 3600 + 6 * 60 + 37 + 60)
         self.assertEqual(ce.parse_reset("45m"), 45 * 60 + 60)
         self.assertEqual(ce.parse_reset("garbage"), 3600)
+
+
+KEY_VARS = ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "ANTHROPIC_API_KEY")
+SECRET = "sk-should-never-be-printed-42"
+
+
+class InitTest(unittest.TestCase):
+    """`init` detection and choice, with a PATH that holds only fake CLIs."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="execute-cheaper-init-"))
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.cfg = self.tmp / "xdg-config" / "execute-cheaper"
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("EXECUTE_CHEAPER_", "ANTHROPIC_")) and k not in KEY_VARS}
+        self.env.update(PATH=str(self.bin), HOME=str(self.tmp), XDG_CONFIG_HOME=str(self.tmp / "xdg-config"),
+                        XDG_STATE_HOME=str(self.tmp / "xdg-state"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def fake(self, *names):
+        for n in names:
+            (self.bin / n).write_text("#!/bin/sh\nexit 0\n")
+            (self.bin / n).chmod(0o755)
+
+    def init(self, *args, **extra):
+        return subprocess.run([sys.executable, str(SCRIPT), "init", *args], env=dict(self.env, **extra),
+                              capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+
+    def detect(self, **extra):
+        r = self.init("--detect", "--json", **extra)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_detect_json_schema_is_stable(self):
+        self.fake("codex", "claude")
+        d = self.detect(DEEPSEEK_API_KEY=SECRET)
+        self.assertEqual(sorted(d), ["clis", "config_exists", "config_path", "env_path", "keys", "routes",
+                                     "schema", "suggested", "warnings"])
+        self.assertEqual(d["schema"], 1)
+        self.assertEqual(d["clis"], {"agy": False, "claude": True, "codex": True, "copilot": False})
+        self.assertEqual(d["keys"]["DEEPSEEK_API_KEY"], "env")
+        self.assertIsNone(d["keys"]["OPENROUTER_API_KEY"])
+        self.assertEqual([r["name"] for r in d["routes"]], list(ce.EXAMPLE_CONFIG["providers"]))
+        for r in d["routes"]:
+            self.assertEqual(sorted(r), ["about", "billing", "can_verify", "cli", "family", "key_env", "kind",
+                                         "missing", "name", "note", "opt_in", "ready"])
+        self.assertEqual(d["suggested"], {"chain": ["codex", "deepseek"], "verify": "claude-login"})
+        self.assertFalse((self.cfg / "config.json").exists())  # --detect writes nothing
+        agents = (ROOT / "AGENTS.md").read_text()
+        for field in [*d, *d["routes"][0]]:  # every documented field is real and every real field documented
+            self.assertIn(f"`{field}`", agents)
+        self.assertFalse(self.cfg.exists())
+
+    def test_agy_is_never_suggested_and_carries_the_terms_warning(self):
+        self.fake("agy", "claude")
+        d = self.detect()
+        agy = next(r for r in d["routes"] if r["name"] == "agy")
+        self.assertTrue(agy["ready"] and agy["opt_in"])
+        self.assertIn("terms", agy["note"])
+        self.assertTrue(any("terms" in w for w in d["warnings"]))
+        self.assertEqual(d["suggested"], {"chain": ["claude-login"], "verify": "claude-login"})
+        r = self.init("--chain", "agy", "--verify", "claude-login", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(json.loads((self.cfg / "config.json").read_text())["chain"], ["agy"])
+
+    def test_verifier_defaults_to_another_family(self):
+        self.fake("codex", "claude")
+        self.assertEqual(self.detect()["suggested"], {"chain": ["codex"], "verify": "claude-login"})
+        (self.bin / "claude").unlink()
+        self.assertEqual(self.detect()["suggested"], {"chain": ["codex"], "verify": "codex"})
+
+    def test_flags_write_only_the_chosen_providers_and_their_keys(self):
+        self.fake("codex", "claude")
+        r = self.init("--chain", "codex,openrouter", "--verify", "claude-login", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual((out["ok"], out["written"], out["keys_to_fill"]), (True, True, ["OPENROUTER_API_KEY"]))
+        cfg = json.loads((self.cfg / "config.json").read_text())
+        self.assertEqual(sorted(cfg["providers"]), ["claude-login", "codex", "openrouter"])
+        self.assertEqual(cfg["verify"]["provider"], "claude-login")
+        self.assertEqual(ce.validate_config(cfg), [])
+        env_lines = [ln for ln in (self.cfg / ".env").read_text().splitlines() if not ln.startswith("#")]
+        self.assertEqual(env_lines, ["OPENROUTER_API_KEY="])
+        again = self.init("--chain", "codex,openrouter", "--verify", "claude-login", "--json")
+        self.assertEqual(again.returncode, 0, again.stdout)
+        self.assertFalse(json.loads(again.stdout)["written"])
+        self.assertEqual((self.cfg / ".env").read_text().count("OPENROUTER_API_KEY"), 1)
+        other = self.init("--chain", "codex", "--json")
+        self.assertEqual(other.returncode, 1)
+        self.assertIn("--force", json.loads(other.stdout)["errors"][0])
+        forced = self.init("--chain", "codex", "--verify", "none", "--force")
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertEqual(json.loads((self.cfg / "config.json").read_text())["providers"].keys(), {"codex"})
+
+    def test_flags_reject_missing_cli_and_bad_verifier(self):
+        self.fake("claude")
+        r = self.init("--chain", "copilot")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no `copilot` CLI", r.stderr)
+        r = self.init("--chain", "claude-login", "--verify", "nope")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("unknown route 'nope'", r.stderr)
+        self.fake("copilot")
+        r = self.init("--chain", "claude-login", "--verify", "copilot")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("must be a claude or codex route", r.stderr)
+        self.assertFalse((self.cfg / "config.json").exists())
+
+    def test_nothing_usable_exits_nonzero_without_writing(self):
+        for args in ((), ("--yes",), ("--json",)):
+            r = self.init(*args)
+            self.assertEqual(r.returncode, 1, args)
+            self.assertIn("nothing usable found", r.stdout + r.stderr)
+        self.assertFalse((self.cfg / "config.json").exists())
+
+    def test_yes_accepts_detection(self):
+        self.fake("codex", "claude")
+        r = self.init("--yes", OPENROUTER_API_KEY=SECRET)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cfg = json.loads((self.cfg / "config.json").read_text())
+        self.assertEqual((cfg["chain"], cfg["verify"]["provider"]), (["codex", "openrouter"], "claude-login"))
+        self.assertNotIn("OPENROUTER_API_KEY=", (self.cfg / ".env").read_text())  # already in the environment
+
+    def test_keys_never_appear_in_any_output(self):
+        self.fake("codex", "claude")
+        self.cfg.mkdir(parents=True)
+        (self.cfg / ".env").write_text(f"ZAI_API_KEY={SECRET}\n")
+        extra = {"OPENROUTER_API_KEY": SECRET, "DEEPSEEK_API_KEY": SECRET}
+        outs = [self.init("--detect", **extra), self.init("--detect", "--json", **extra),
+                self.init("--yes", "--json", **extra), self.init("--chain", "zai,deepseek", "--force", **extra)]
+        for args in (("status",), ("status", "--json")):
+            outs.append(subprocess.run([sys.executable, str(SCRIPT), *args], env=dict(self.env, **extra),
+                                       capture_output=True, text=True, timeout=60))
+        for r in outs:
+            self.assertNotIn(SECRET, r.stdout + r.stderr)
+        status = json.loads(outs[-1].stdout)
+        self.assertEqual({p["name"]: p["key_source"] for p in status["providers"] if p["in_chain"]},
+                         {"zai": ".env", "deepseek": "env"})
+        self.assertTrue(status["ready"])
+
+    def test_status_reports_routes_that_cannot_run(self):
+        self.fake("codex", "claude")
+        self.assertEqual(self.init("--chain", "codex,openrouter", "--verify", "claude-login").returncode, 0)
+        (self.bin / "codex").unlink()
+        r = subprocess.run([sys.executable, str(SCRIPT), "status", "--json"], env=self.env, capture_output=True,
+                           text=True, timeout=60)
+        s = json.loads(r.stdout)
+        self.assertEqual(s["problems"], ["chain provider 'codex' can't run yet: no `codex` CLI",
+                                         "chain provider 'openrouter' can't run yet: no OPENROUTER_API_KEY"])
+        self.assertFalse(s["ready"])
+
+    def test_interactive_choice(self):
+        self.fake("codex", "claude", "agy")
+        answers = iter(["copilot", "agy,1", "", ""])  # copilot is missing: asked again
+        prompts = []
+
+        def fake_input(prompt):
+            prompts.append(prompt)
+            return next(answers)
+
+        paths = dict(CONFIG_DIR=self.cfg, CONFIG_PATH=self.cfg / "config.json", ENV_PATH=self.cfg / ".env",
+                     PROFILE_DIR=self.tmp / "profile", STATE_DIR=self.tmp / "state")
+        args = ce.build_parser().parse_args(["init"])
+        with mock.patch.multiple(ce, **paths), mock.patch.dict(os.environ, {"PATH": str(self.bin)}), \
+                mock.patch("builtins.input", fake_input), mock.patch.object(sys.stdin, "isatty", lambda: True), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            for k in KEY_VARS:
+                os.environ.pop(k, None)
+            self.assertEqual(ce.cmd_init(args), 0)
+        self.assertIn("[codex]", prompts[0])
+        self.assertIn("no `copilot` CLI", out.getvalue())
+        self.assertIn("[claude-login]", prompts[2])  # verifier default: another family than agy and codex
+        self.assertIn("terms", out.getvalue())
+        cfg = json.loads((self.cfg / "config.json").read_text())
+        self.assertEqual((cfg["chain"], cfg["verify"]["provider"]), (["agy", "codex"], "claude-login"))
 
 
 if __name__ == "__main__":

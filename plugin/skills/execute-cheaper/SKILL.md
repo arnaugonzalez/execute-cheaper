@@ -23,8 +23,8 @@ execute-cheaper status
 
 - Missing: tell the user to run `pipx install execute-cheaper` (or `uv tool install execute-cheaper`).
   For a one-off run, `uvx execute-cheaper ...` works without installing.
-- `status` says there is no config: run `execute-cheaper init` (it never overwrites an existing
-  config), then show the user the `chain` line and ask which of their CLIs or keys to keep.
+- `status` says there is no config: follow the `setup` skill (`init --detect --json`, ask the user
+  which routes and verifier, `init --chain ... --verify ... --json`). Never ask for a key in the chat.
 - A provider marked NOT FOUND or MISSING is skipped at run time; that is fine as long as one is ready.
 
 ## 2. Write the plan as a contract

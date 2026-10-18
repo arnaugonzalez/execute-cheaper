@@ -2,7 +2,6 @@
   "chain": [
     "codex",
     "copilot",
-    "agy",
     "openrouter"
   ],
   "verify": {

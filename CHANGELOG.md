@@ -27,4 +27,13 @@ First public release.
   launches the run in the background and reads only the verdict.
 - Release hardening: Trusted Publishing, maintainer approval for every PyPI upload, GitHub Actions
   pinned by commit SHA with least-privilege permissions, Dependabot for Actions.
-- `--on-event` hook for notifications and integrations; `init` command; XDG paths.
+- `init` detects the coding CLIs and API keys you have (key names only, never values) and asks which
+  routes to use, in what order, and which verifier (default: one from another vendor). The config
+  holds only those providers and `.env` only the keys they still need. No fixed chain: Antigravity
+  and local servers are opt-in. Non-interactive: `init --chain a,b --verify x`, `--yes`; exits 1
+  without writing when nothing usable is found; `--force` to replace a config.
+- Agent setup: `init --detect --json`, `init ... --json` and `status --json` (versioned schema, key
+  names and where they are set, never values); `AGENTS.md` and a `/execute-cheaper:setup` skill walk
+  an agent through detect → ask the user → init → status without a key ever going through the chat.
+- `status` names every chain or verifier provider that can't run yet (missing CLI or key).
+- `--on-event` hook for notifications and integrations; XDG paths.

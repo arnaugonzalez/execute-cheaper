@@ -21,8 +21,8 @@ the ones you already have.
 
 - **Stop spending Claude Code's usage limits on typing.** Write the plan in Claude Code or with Opus, then let
   the ChatGPT Free, Copilot Student or Antigravity plan you forgot about do the typing.
-- **Keep going when a quota runs out.** The chain falls through Codex → Copilot → Antigravity →
-  OpenRouter and remembers cooldowns between runs, so it stops knocking on closed doors.
+- **Keep going when a quota runs out.** The chain falls through the routes you picked (say Codex →
+  Copilot → OpenRouter) and remembers cooldowns between runs, so it stops knocking on closed doors.
 - **Get a review that can't mark its own homework.** The verifier runs in another process with no
   edit tools, compares `git diff` to the plan and answers `ok`, `incomplete`, `out_of_scope` or
   `regression`. Anything but `ok` goes back to the executor with the findings.
@@ -37,8 +37,8 @@ Same plan, measured on 2026-09-24 ([how](#measured-cost)): **$0.139** with Sonne
 
 ```bash
 pipx install execute-cheaper      # or: uv tool install execute-cheaper
-execute-cheaper init              # writes ~/.config/execute-cheaper/config.json and .env
-execute-cheaper status            # which of your CLIs and keys it found
+execute-cheaper init              # shows the CLIs and keys it found, asks which to use, writes the config
+execute-cheaper status            # whether every route you picked can run
 execute-cheaper run --plan PLAN.md --cwd path/to/repo
 ```
 
@@ -54,6 +54,44 @@ A plan is plain Markdown: the tasks, what is out of scope, and the checks to run
 [`examples/plans/`](examples/plans/). Free and student plans restrict which models you get; see
 [Limits](#limits-and-non-goals).
 
+### Pick your routes
+
+`init` looks for the coding CLIs and API keys you have (key names only: values are never printed), then
+asks which routes to use, in what order, and who verifies. The defaults are what it detected, in its
+order, with a verifier from a different vendor than the executors. Antigravity (`agy`) and local
+servers are never picked for you. Only the routes you choose go into `config.json`, and `.env` gets an
+empty line only for the keys they still need.
+
+```bash
+execute-cheaper init --detect          # what it found; writes nothing (--json for agents)
+# ChatGPT subscription types, your Claude subscription reviews:
+execute-cheaper init --chain codex --verify claude-login
+# Only Claude and API keys: cheap models type, your Claude login reviews:
+execute-cheaper init --chain deepseek,openrouter --verify claude-login
+# Antigravity and Claude (read Google's terms first, see Limits):
+execute-cheaper init --chain agy --verify claude-login
+```
+
+Without a terminal, `init` takes the detected routes (`--yes` says so explicitly). It exits 1 without
+writing anything when nothing usable is found. It never overwrites a config unless you pass `--force`,
+and repeating the same `--chain`/`--verify` is a no-op.
+
+### Set it up from your agent
+
+Claude Code, Codex or any agent with a shell can do the whole setup in your chat. Paste this:
+
+```text
+Install execute-cheaper (pipx install execute-cheaper) and set it up for me by following
+https://github.com/arnaugonzalez/execute-cheaper/blob/main/AGENTS.md: run `execute-cheaper init --detect --json`,
+show me the routes it found, ask me which executors to use, in what order, and which verifier, then
+run `init --chain ... --verify ... --json` and `status --json`. Never ask me for an API key in the
+chat: tell me the file and the variable name and I will paste it there myself.
+```
+
+The JSON from `init --detect --json` and `status --json` is versioned (`"schema": 1`) and holds key
+names and where they are set (`env`, `.env` or `null`), never their values. With the plugin below,
+`/execute-cheaper:setup` runs the same flow.
+
 ### From Claude Code
 
 Plan in Claude Code, then let it hand the plan off: the plugin adds a skill that writes the plan as a
@@ -65,7 +103,8 @@ contract, launches `execute-cheaper` in the background and reads only the verdic
 ```
 
 Then ask for it in plain words ("run this plan cheaply", "let Codex implement it, I'm close to my
-usage limit"). The skill is a plain `SKILL.md` in [`plugin/`](plugin/skills/execute-cheaper/SKILL.md).
+usage limit"). The skills are plain `SKILL.md` files in [`plugin/skills/`](plugin/skills/): `execute-cheaper`
+runs plans, `setup` (`/execute-cheaper:setup`) configures your routes from the chat.
 
 ## What a run looks like
 
@@ -113,7 +152,7 @@ by `execute-cheaper init`. Keys go in `.env` in the same directory (mode 600) or
 
 ```jsonc
 {
-  "chain": ["codex", "copilot", "agy", "openrouter"],   // executors, tried in order
+  "chain": ["codex", "copilot", "openrouter"],     // the executors you picked, tried in order
   "verify": {"provider": "claude-login", "tier": "pro"},
   "max_rounds": 2,
   "on_event": null,                                // shell command, gets each event as JSON on stdin
@@ -146,7 +185,8 @@ by `execute-cheaper init`. Keys go in `.env` in the same directory (mode 600) or
 }
 ```
 
-Presets in the generated config: `codex`, `copilot`, `agy`, `openrouter`, `deepseek` (with its off-peak/peak
+Built-in presets `init` offers (all of them are in [`config.example.json`](config.example.json); the
+generated config keeps only the ones you pick): `codex`, `copilot`, `agy`, `openrouter`, `deepseek` (with its off-peak/peak
 pricing), `zai` (GLM; on the GLM Coding Plan set `"billing": "subscription"`), `anthropic` (API key),
 `claude-login` (your own Claude Code subscription login) and `ollama` (local; also works with LM Studio,
 vLLM, llama.cpp or a LiteLLM proxy, since they all expose the Anthropic Messages API). Prices are dated
