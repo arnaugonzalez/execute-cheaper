@@ -146,7 +146,7 @@ auditable cost record.
 | **Aider** architect/editor | Built-in two-model workflow, repo map, auto lint/test | Wrapping any agent CLI, an independent verifier process, provider fallback with cooldowns |
 | **LiteLLM** router / proxy | Production-grade fallbacks, retries, budgets, cost tracking at the HTTP layer | Knowing what a plan and a diff are. The two combine: point a provider's `base_url` at your LiteLLM proxy |
 | **claude-code-router** | Routing Claude Code requests per scenario (background, long context) to many providers | A run with a verdict and a cost figure, not a request router |
-| **OpenHands / opencode / Codex `exec`** | Full agent platforms: sandboxing, many providers, rich UIs | Being one stdlib-only Python file (~1.2k lines) of glue *around* such agents, meant to be called by another agent or CI |
+| **OpenHands / opencode / Codex `exec`** | Full agent platforms: sandboxing, many providers, rich UIs | Being one stdlib-only Python file (~1.6k lines) of glue *around* such agents, meant to be called by another agent or CI |
 | **Claude Code subagents** | Zero setup inside a session | Using non-Claude models without a proxy, and a verifier that does not share the parent's context |
 
 ## Configuration
