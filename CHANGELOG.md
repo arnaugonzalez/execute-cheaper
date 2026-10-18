@@ -9,9 +9,12 @@ First public release.
   DeepSeek, Z.ai, Ollama/LM Studio/LiteLLM proxy) as configurable API fallback.
 - Generic `cli` adapter: any headless coding CLI becomes an executor from config alone (argv
   template, text or JSON output, usage paths, failure/quota/auth regexes). Copilot is the tested
-  preset; Gemini CLI and `cursor-agent` ship untested in `examples/providers/`.
+  preset; Gemini CLI ships untested in `examples/providers/`.
 - `cli` adapter `output: "jsonl"` for event-stream CLIs (usage summed over every event) and `cost_field`
-  for the cost a CLI reports itself; tested opencode preset, plus presets for the Z.ai and MiniMax coding plans.
+  for the cost a CLI reports itself; built-in `opencode` preset (tested with opencode 2.0.29, which dropped `--pure`: the preset uses
+  `--standalone`), plus presets for the Z.ai and MiniMax coding plans in `examples/providers/`.
+- Built-in `cursor` preset (Cursor CLI, `cursor-agent`), untested. `init` offers `opencode` and `cursor`
+  as opt-in routes: detected and listed, never picked unless named.
 - Server-side tool calls (`usage.server_tool_use`) priced per call via `tool_prices`, starting at
   `tool_prices_since`; the DeepSeek preset bills Search/Fetch at $0.00075 from 2026-11-01 (Beijing).
 - Provider chain with cooldowns persisted across runs; `agy` watchdog for quota hangs.

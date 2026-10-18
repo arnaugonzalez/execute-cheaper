@@ -87,6 +87,31 @@ EXAMPLE_CONFIG: dict = {
             "timeout_s": 3600,
             "billing": "subscription",
         },
+        # opencode 2.x: --standalone runs a private server per call; --auto lets it edit headless. It exits 0 on
+        # errors, so fail_re matches its error event; tokens and cost come from its step_finish events.
+        "opencode": {
+            "kind": "cli",
+            "cmd": ["opencode", "run", "--standalone", "--auto", "--format", "json", "--title", "execute-cheaper {label}",
+                    "-m", "{model}", "{prompt}"],
+            "output": "jsonl",
+            "text_field": "part.text",
+            "fail_re": "^\\{\"type\":\"error\"",
+            "usage": {"input_tokens": "part.tokens.input", "cache_read_input_tokens": "part.tokens.cache.read",
+                      "cache_creation_input_tokens": "part.tokens.cache.write", "output_tokens": "part.tokens.output",
+                      "thinking_tokens": "part.tokens.reasoning"},
+            "cost_field": "part.cost",
+            "models": {"flash": "opencode/mimo-v2.6-flash-free", "pro": "opencode/nemotron-3-ultra-free"},
+            "timeout_s": 3600,
+            "billing": "paid",
+        },
+        # Cursor CLI. Newer installs call the binary `agent`; `cursor-agent` is kept as an alias.
+        "cursor": {
+            "kind": "cli",
+            "cmd": ["cursor-agent", "-p", "{prompt}", "--model", "{model}", "--output-format", "text", "--force"],
+            "models": {"flash": "auto", "pro": "auto"},
+            "timeout_s": 3600,
+            "billing": "subscription",
+        },
         "agy": {
             "kind": "agy",
             "models": {"flash": "gemini-3.8-flash-high", "pro": "gemini-3.1-pro-high"},
@@ -1283,6 +1308,8 @@ def cmd_cooldown(args: argparse.Namespace) -> int:
 ROUTE_INFO: dict[str, tuple[str, str]] = {
     "codex": ("openai", "Codex CLI on your ChatGPT login"),
     "copilot": ("github", "GitHub Copilot CLI on your Copilot plan"),
+    "opencode": ("opencode", "opencode CLI (free models by default, or any provider it has)"),
+    "cursor": ("cursor", "Cursor CLI (cursor-agent) on your Cursor plan"),
     "agy": ("google", "Google Antigravity CLI on your Google plan"),
     "openrouter": ("openrouter", "Claude Code on OpenRouter (DeepSeek, GLM...), API key"),
     "deepseek": ("deepseek", "Claude Code on the DeepSeek API, API key"),
@@ -1294,6 +1321,8 @@ ROUTE_INFO: dict[str, tuple[str, str]] = {
 # Offered, never picked by default.
 OPT_IN: dict[str, str] = {
     "agy": "opt-in: Google's Antigravity terms restrict use with third-party tools; read them before you script it",
+    "opencode": "opt-in: its default models are opencode's free ones; check their data terms or set your own models",
+    "cursor": "opt-in: preset not yet run end to end by the author; flags from Cursor's CLI docs",
     "ollama": "opt-in: needs a server at http://localhost:11434 (Ollama, LM Studio, vLLM, llama.cpp, LiteLLM)",
 }
 VERIFIER_PREFERENCE = ("claude-login", "codex", "anthropic")
@@ -1360,14 +1389,14 @@ def detect(secrets: dict) -> dict:
 
 
 def detect_table(found: dict) -> str:
-    lines = ["  #  route         status                       what it is"]
+    lines = ["  #  route         status                          what it is"]
     for i, r in enumerate(found["routes"], 1):
         status = "ready" if r["ready"] else ", ".join(r["missing"])
         if r["opt_in"]:
             status += " · opt-in"
-        lines.append(f"  {i:<2} {r['name']:<13} {status:<28} {r['about']}")
+        lines.append(f"  {i:<2} {r['name']:<13} {status:<31} {r['about']}")
     lines += [f"  note {w}" for w in found["warnings"]]
-    lines.append("  more CLIs (opencode, cursor-agent, Gemini CLI): presets in the repo's examples/providers/")
+    lines.append("  more (Gemini CLI, opencode on coding plans): presets in the repo's examples/providers/")
     return "\n".join(lines)
 
 

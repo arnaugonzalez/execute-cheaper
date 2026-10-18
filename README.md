@@ -46,7 +46,7 @@ Needs Python 3.11+, git and at least one of these. Whatever you don't have is sk
 
 | | Measured by the author | Also supported |
 |---|---|---|
-| **Subscriptions** | Codex CLI (`codex login`, ChatGPT Free and up) · GitHub Copilot CLI (Student and up) · your Claude Code login | Antigravity `agy` · `cursor-agent`, opencode and Gemini CLI as [untested presets](examples/providers/) |
+| **Subscriptions** | Codex CLI (`codex login`, ChatGPT Free and up) · GitHub Copilot CLI (Student and up) · your Claude Code login · opencode (free models) | Antigravity `agy` · Cursor CLI (`cursor-agent`, untested) · Gemini CLI as an [untested preset](examples/providers/) |
 | **APIs** | OpenRouter | DeepSeek · Z.ai GLM · Anthropic · any Anthropic Messages-compatible endpoint |
 | **Local** | | Ollama · LM Studio · vLLM · llama.cpp · LiteLLM proxy |
 
@@ -58,8 +58,8 @@ A plan is plain Markdown: the tasks, what is out of scope, and the checks to run
 
 `init` looks for the coding CLIs and API keys you have (key names only: values are never printed), then
 asks which routes to use, in what order, and who verifies. The defaults are what it detected, in its
-order, with a verifier from a different vendor than the executors. Antigravity (`agy`) and local
-servers are never picked for you. Only the routes you choose go into `config.json`, and `.env` gets an
+order, with a verifier from a different vendor than the executors. Antigravity (`agy`), opencode, Cursor
+(`cursor-agent`) and local servers are never picked for you: name them. Only the routes you choose go into `config.json`, and `.env` gets an
 empty line only for the keys they still need.
 
 ```bash
@@ -70,6 +70,8 @@ execute-cheaper init --chain codex --verify claude-login
 execute-cheaper init --chain deepseek,openrouter --verify claude-login
 # Antigravity and Claude (read Google's terms first, see Limits):
 execute-cheaper init --chain agy --verify claude-login
+# Cursor first, opencode's free models as fallback (the chain in the demo GIF, plus opencode):
+execute-cheaper init --chain cursor,opencode,copilot --verify claude-login
 ```
 
 Without a terminal, `init` takes the detected routes (`--yes` says so explicitly). It exits 1 without
@@ -186,13 +188,16 @@ by `execute-cheaper init`. Keys go in `.env` in the same directory (mode 600) or
 ```
 
 Built-in presets `init` offers (all of them are in [`config.example.json`](config.example.json); the
-generated config keeps only the ones you pick): `codex`, `copilot`, `agy`, `openrouter`, `deepseek` (with its off-peak/peak
+generated config keeps only the ones you pick): `codex`, `copilot`, `opencode`, `cursor`, `agy`, `openrouter`, `deepseek` (with its off-peak/peak
 pricing), `zai` (GLM; on the GLM Coding Plan set `"billing": "subscription"`), `anthropic` (API key),
 `claude-login` (your own Claude Code subscription login) and `ollama` (local; also works with LM Studio,
 vLLM, llama.cpp or a LiteLLM proxy, since they all expose the Anthropic Messages API). Prices are dated
-(`prices_as_of`) and will go stale: check the provider's page. More presets, **not tested by the
-author**, live in [`examples/providers/`](examples/providers/) (Gemini CLI, Cursor's `cursor-agent`,
-opencode).
+(`prices_as_of`) and will go stale: check the provider's page. `opencode` runs
+`opencode run --standalone --auto --format json` (tested with opencode 2.0.29 on 2026-10-18; its default
+models are opencode's free ones, so check their data terms or set your own `provider/model`). `cursor`
+runs `cursor-agent -p ... --force` and **has not been run by the author** (newer Cursor installs name
+the binary `agent`; put that in `cmd` if `cursor-agent` is missing). More presets live in
+[`examples/providers/`](examples/providers/) (Gemini CLI, opencode on the Z.ai and MiniMax coding plans).
 
 | Field | Meaning |
 |---|---|
@@ -266,8 +271,8 @@ stops a run. [`examples/hooks/`](examples/hooks/) has desktop notifications, [ap
 ## Roadmap
 
 - Generic hang watchdog for the `claude` adapter (it currently gets a timeout only).
-- Real runs behind the `examples/providers/` presets (Gemini CLI with an API key, `cursor-agent`,
-  opencode). Reports of what works, and with which flags, are welcome as issues.
+- Real runs behind the untested presets (`cursor`, Gemini CLI with an API key, the opencode coding
+  plans). Reports of what works, and with which flags, are welcome as issues.
 - Optional pre-verification checks (`lint`/`test` commands) that run before the verifier.
 
 ## License

@@ -54,6 +54,58 @@
       "timeout_s": 3600,
       "billing": "subscription"
     },
+    "opencode": {
+      "kind": "cli",
+      "cmd": [
+        "opencode",
+        "run",
+        "--standalone",
+        "--auto",
+        "--format",
+        "json",
+        "--title",
+        "execute-cheaper {label}",
+        "-m",
+        "{model}",
+        "{prompt}"
+      ],
+      "output": "jsonl",
+      "text_field": "part.text",
+      "fail_re": "^\\{\"type\":\"error\"",
+      "usage": {
+        "input_tokens": "part.tokens.input",
+        "cache_read_input_tokens": "part.tokens.cache.read",
+        "cache_creation_input_tokens": "part.tokens.cache.write",
+        "output_tokens": "part.tokens.output",
+        "thinking_tokens": "part.tokens.reasoning"
+      },
+      "cost_field": "part.cost",
+      "models": {
+        "flash": "opencode/mimo-v2.6-flash-free",
+        "pro": "opencode/nemotron-3-ultra-free"
+      },
+      "timeout_s": 3600,
+      "billing": "paid"
+    },
+    "cursor": {
+      "kind": "cli",
+      "cmd": [
+        "cursor-agent",
+        "-p",
+        "{prompt}",
+        "--model",
+        "{model}",
+        "--output-format",
+        "text",
+        "--force"
+      ],
+      "models": {
+        "flash": "auto",
+        "pro": "auto"
+      },
+      "timeout_s": 3600,
+      "billing": "subscription"
+    },
     "agy": {
       "kind": "agy",
       "models": {

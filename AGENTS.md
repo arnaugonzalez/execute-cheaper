@@ -25,7 +25,7 @@ Stable JSON:
 | `suggested` | `{"chain": [...], "verify": name or null}`: the ready routes in order, minus opt-in ones, and a verifier from another family |
 | `clis` | binary name → found on PATH |
 | `keys` | variable name → `"env"`, `".env"` or `null`. Never the value |
-| `warnings` | Opt-in routes and why (Antigravity's terms, local servers) |
+| `warnings` | Opt-in routes and why (Antigravity's terms, opencode's free models, the untested Cursor preset, local servers) |
 | `config_path`, `env_path`, `config_exists` | Where the config and the keys file live |
 
 ## 3. Ask the user, in the chat
@@ -38,7 +38,9 @@ Show the routes as a short list (ready / missing what), then ask:
    Offer `suggested.verify` as the default, or `none`.
 
 `agy` (Antigravity) only goes in if the user names it: relay its `note` (Google's terms restrict
-use with third-party tools) before you add it. Same for `ollama` (it needs a local server).
+use with third-party tools) before you add it. Same for every other route with `opt_in: true`:
+`opencode` (its default models are opencode's free ones), `cursor` (Cursor CLI, preset not yet run by
+the author) and `ollama` (it needs a local server). Relay the `note` and add them only if named.
 
 ## 4. Write the config
 

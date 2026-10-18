@@ -407,7 +407,7 @@ class CheapExecTest(unittest.TestCase):
         self.assertEqual((ex["input"], ex["cached"], ex["output"]), (150, 40, 10))  # '*' sums both models
 
     def test_cli_jsonl_events_sum_usage_and_cli_cost(self):
-        preset = json.loads((ROOT / "examples" / "providers" / "opencode.json").read_text())["opencode"]
+        preset = ce.EXAMPLE_CONFIG["providers"]["opencode"]
         self.config["chain"] = ["cli"]
         self.config["providers"]["cli"] = dict(preset, cmd=["fake-cli", "--model", "{model}", "-p", "{prompt}"],
                                                models={"flash": "x-flash", "pro": "x-pro"})
@@ -419,8 +419,29 @@ class CheapExecTest(unittest.TestCase):
         self.assertEqual((ex["input"], ex["cached"], ex["output"]), (950, 1100, 35))  # reasoning counts as output
         self.assertAlmostEqual(ex["cost_usd"], 0.0015)  # no price table: the CLI's own figure
 
+    def test_builtin_cursor_and_opencode_presets_run_as_is(self):
+        presets = ce.EXAMPLE_CONFIG["providers"]
+        self.config["chain"] = ["cursor", "opencode"]
+        self.config["providers"].update(cursor=presets["cursor"], opencode=presets["opencode"])
+        self.save_config()
+        self.write_bin("opencode", FAKE_CLI)
+        path = f"{self.bin}:/usr/bin:/bin"  # no real cursor-agent: the chain falls through, as in the demo GIF
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_CLI": "jsonl", "PATH": path})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("binary not found: cursor-agent", r.stdout + r.stderr)
+        self.assertIn("opencode: OK", r.stdout)
+        ex = next(e for e in self.ledger() if e["role"] == "executor" and e["provider"] == "opencode")
+        self.assertAlmostEqual(ex["cost_usd"], 0.0015)
+        self.write_bin("cursor-agent", FAKE_CLI)
+        log_path = self.tmp / "args.log"
+        r = self.run_cli("run", "--plan", "PLAN.md", "--chain", "cursor",
+                         extra_env={"PATH": path, "FAKE_ARGS_LOG": str(log_path)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("cursor: OK", r.stdout)
+        self.assertRegex(log_path.read_text(), r"cli model=auto prompt_len=[1-9]\d+")
+
     def test_cli_jsonl_error_event_falls_through(self):
-        preset = json.loads((ROOT / "examples" / "providers" / "opencode.json").read_text())["opencode"]
+        preset = ce.EXAMPLE_CONFIG["providers"]["opencode"]
         self.config["chain"] = ["cli", "cheapapi"]
         self.config["providers"]["cli"] = dict(preset, cmd=["fake-cli", "-p", "{prompt}"],
                                                models={"flash": "x-flash", "pro": "x-pro"})
@@ -683,7 +704,8 @@ class InitTest(unittest.TestCase):
         self.assertEqual(sorted(d), ["clis", "config_exists", "config_path", "env_path", "keys", "routes",
                                      "schema", "suggested", "warnings"])
         self.assertEqual(d["schema"], 1)
-        self.assertEqual(d["clis"], {"agy": False, "claude": True, "codex": True, "copilot": False})
+        self.assertEqual(d["clis"], {"agy": False, "claude": True, "codex": True, "copilot": False,
+                                     "cursor-agent": False, "opencode": False})
         self.assertEqual(d["keys"]["DEEPSEEK_API_KEY"], "env")
         self.assertIsNone(d["keys"]["OPENROUTER_API_KEY"])
         self.assertEqual([r["name"] for r in d["routes"]], list(ce.EXAMPLE_CONFIG["providers"]))
@@ -708,6 +730,34 @@ class InitTest(unittest.TestCase):
         r = self.init("--chain", "agy", "--verify", "claude-login", "--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(json.loads((self.cfg / "config.json").read_text())["chain"], ["agy"])
+
+    def test_opencode_and_cursor_are_offered_opt_in_and_reach_status(self):
+        self.fake("opencode", "cursor-agent", "claude")
+        d = self.detect()
+        routes = {r["name"]: r for r in d["routes"]}
+        for name, cli in (("opencode", "opencode"), ("cursor", "cursor-agent")):
+            self.assertEqual((routes[name]["cli"], routes[name]["ready"], routes[name]["opt_in"]), (cli, True, True))
+            self.assertFalse(routes[name]["can_verify"])
+        self.assertEqual(d["suggested"], {"chain": ["claude-login"], "verify": "claude-login"})
+        table = self.init("--detect").stdout
+        self.assertIn("opencode", table)
+        self.assertIn("cursor", table)
+        r = self.init("--chain", "cursor,opencode", "--verify", "claude-login", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        cfg = json.loads((self.cfg / "config.json").read_text())
+        self.assertEqual(cfg["providers"]["opencode"], ce.EXAMPLE_CONFIG["providers"]["opencode"])
+        self.assertEqual(cfg["providers"]["cursor"]["cmd"][0], "cursor-agent")
+        self.assertEqual(ce.validate_config(cfg), [])
+        s = subprocess.run([sys.executable, str(SCRIPT), "status", "--json"], env=self.env, capture_output=True,
+                           text=True, timeout=60)
+        st = json.loads(s.stdout)
+        self.assertTrue(st["ready"], st)
+        self.assertEqual({p["cli"] for p in st["providers"] if p["in_chain"]}, {"cursor-agent", "opencode"})
+        self.assertEqual(st["chain"], ["cursor", "opencode"])
+        text = subprocess.run([sys.executable, str(SCRIPT), "status"], env=self.env, capture_output=True,
+                              text=True, timeout=60).stdout
+        self.assertIn("cursor [cli]: cursor-agent ok", text)
+        self.assertIn("opencode [cli]: opencode ok", text)
 
     def test_verifier_defaults_to_another_family(self):
         self.fake("codex", "claude")
@@ -796,8 +846,8 @@ class InitTest(unittest.TestCase):
         self.assertFalse(s["ready"])
 
     def test_interactive_choice(self):
-        self.fake("codex", "claude", "agy")
-        answers = iter(["copilot", "agy,1", "", ""])  # copilot is missing: asked again
+        self.fake("codex", "claude", "agy", "opencode")
+        answers = iter(["copilot", "agy,opencode,1", "", ""])  # copilot is missing: asked again
         prompts = []
 
         def fake_input(prompt):
@@ -818,7 +868,7 @@ class InitTest(unittest.TestCase):
         self.assertIn("[claude-login]", prompts[2])  # verifier default: another family than agy and codex
         self.assertIn("terms", out.getvalue())
         cfg = json.loads((self.cfg / "config.json").read_text())
-        self.assertEqual((cfg["chain"], cfg["verify"]["provider"]), (["agy", "codex"], "claude-login"))
+        self.assertEqual((cfg["chain"], cfg["verify"]["provider"]), (["agy", "opencode", "codex"], "claude-login"))
 
 
 if __name__ == "__main__":
