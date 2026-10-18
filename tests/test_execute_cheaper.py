@@ -38,7 +38,8 @@ FAKE_AGY_OK = textwrap.dedent(r'''
 FAKE_CLAUDE = textwrap.dedent(r'''
     #!/usr/bin/env bash
     schema=0; for a in "$@"; do [ "$a" = "--json-schema" ] && schema=1; done
-    if [ -n "${FAKE_ARGS_LOG:-}" ]; then { printf '%s|%s|' "$CLAUDE_CONFIG_DIR" "${ANTHROPIC_BASE_URL:-}"; printf '%q ' "$@"; echo; } >> "$FAKE_ARGS_LOG"; fi
+    prompt="$(cat)"  # like `claude -p`, the prompt arrives on stdin
+    if [ -n "${FAKE_ARGS_LOG:-}" ]; then { printf '%s|%s|' "$CLAUDE_CONFIG_DIR" "${ANTHROPIC_BASE_URL:-}"; printf '%q ' "$@"; echo "stdin_bytes=$(printf %s "$prompt" | wc -c | tr -d ' ')"; } >> "$FAKE_ARGS_LOG"; fi
     if [ "$schema" = 0 ]; then
       if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
         case "$ANTHROPIC_AUTH_TOKEN" in sk-test|ollama) ;; *) echo '{"is_error":true,"result":"bad key"}'; exit 1;; esac
@@ -289,6 +290,21 @@ class CheapExecTest(unittest.TestCase):
         for tool in ("Edit", "Write", "MultiEdit"):
             self.assertIn(tool, verifier_line.split("--disallowedTools", 1)[1])
         self.assertIn("--setting-sources '' ", verifier_line)
+
+    def test_verifier_gets_large_diff_on_stdin_not_argv(self):
+        # Multi-byte text: 120k characters of diff are ~240 KB, over Linux's 128 KiB cap on one argv entry.
+        big = self.repo / "big.txt"
+        big.write_text("a\n")
+        subprocess.run(["git", "add", "big.txt"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base"],
+                       cwd=self.repo, check=True)
+        big.write_text("ñandú " * 50_000)
+        log_path = self.tmp / "args.log"
+        r = self.run_cli("run", "--plan", "PLAN.md", "--chain", "cheapapi", extra_env={"FAKE_ARGS_LOG": str(log_path)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        verifier_line = next(line for line in log_path.read_text(errors="replace").splitlines() if "--json-schema" in line)
+        self.assertNotIn("ñandú", verifier_line.split("stdin_bytes=")[0])
+        self.assertGreater(int(verifier_line.rsplit("stdin_bytes=", 1)[1]), 131_072)
 
     # --- codex ---------------------------------------------------------------
 

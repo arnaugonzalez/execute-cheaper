@@ -472,7 +472,7 @@ def build_exec_prompt(plan: str, findings: dict | None) -> str:
 
 def build_verify_prompt(plan: str, diff: str, untracked: str) -> str:
     return (VERIFY_PROMPT + "\n## Plan\n" + plan + "\n\n## git diff (executor's changes)\n```diff\n" +
-            diff[:120_000] + "\n```\n\n## Untracked files\n" + (untracked or "(none)"))
+            diff[:120_000] + "\n```\n\n## Untracked files\n" + (untracked[:20_000] or "(none)"))
 
 
 # --- adapter: agy -----------------------------------------------------------
@@ -585,7 +585,9 @@ def run_claude(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str,
         env = dict(env, CLAUDE_CONFIG_DIR=config_dir)
     # No --bare: bare mode ignores subscription logins and trims the executor's tools. Instead:
     # no MCP servers, no slash commands, and only the settings sources we choose.
-    cmd = [bin_name, "-p", prompt, "--model", model, "--output-format", "json",
+    # The prompt goes through stdin: a verifier prompt carries the whole diff, and Linux caps a single
+    # argv entry at 128 KiB ("Argument list too long").
+    cmd = [bin_name, "-p", "--model", model, "--output-format", "json",
            "--permission-mode", "bypassPermissions", "--no-session-persistence",
            "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", setting_sources]
     if disallowed:
@@ -599,7 +601,7 @@ def run_claude(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str,
     log(f"{label} > claude -p --model {model}" + (f" --effort {effort}" if effort else ""))
     try:
         proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout_s, check=False,
-                              stdin=subprocess.DEVNULL, start_new_session=True)
+                              input=prompt, start_new_session=True)
     except FileNotFoundError:
         return {"ok": False, "text": "", "reason": f"binary not found: {bin_name}"}
     except subprocess.TimeoutExpired:

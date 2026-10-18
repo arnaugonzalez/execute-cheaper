@@ -19,8 +19,10 @@ First public release.
 - Cost ledger (`usage`), per-run `report.md`, exit codes 0/1/2/3.
 - In a terminal, `run` ends with a four-line summary (verdict, cost, files, report path); pipes, CI
   and agents still get the full report on stdout.
-- Executors run without the user's terminal (no stdin, own session), so an interactive CLI can't
-  wait for input or draw over it.
+- Executors run without the user's terminal (own session; stdin carries only the prompt, or nothing),
+  so an interactive CLI can't wait for input or draw over it.
+- `claude` adapter sends the prompt on stdin, so a verifier prompt with a large diff no longer fails
+  with "Argument list too long" (Linux caps one argv entry at 128 KiB).
 - Claude Code plugin: this repo is its own marketplace; the `execute-cheaper` skill writes the plan,
   launches the run in the background and reads only the verdict.
 - Release hardening: Trusted Publishing, maintainer approval for every PyPI upload, GitHub Actions
