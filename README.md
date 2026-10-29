@@ -1,3 +1,5 @@
+![execute-cheaper: your best model plans, the coding CLIs you already pay for type, a separate read-only model verifies the diff](docs/social-preview.jpg)
+
 # execute-cheaper
 
 **Your best model is a brilliant architect and a very expensive typist.**<br>
@@ -8,11 +10,6 @@ Let it plan. Hand the typing to the coding CLIs you already pay for. Have someon
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
-
-![A real run: cursor-agent is not installed, so the chain falls back to GitHub Copilot; a separate read-only Claude reviewer then approves the diff](docs/demo.gif)
-
-<sub>A real run with idle frames cut. `cursor-agent` isn't installed, so the chain falls back to GitHub
-Copilot, then a separate, read-only Claude reviewer checks the diff against the plan.</sub>
 
 It is not another coding agent (you have enough of those). It is one Python file that sits between
 the ones you already have.
@@ -70,7 +67,7 @@ execute-cheaper init --chain codex --verify claude-login
 execute-cheaper init --chain deepseek,openrouter --verify claude-login
 # Antigravity and Claude (read Google's terms first, see Limits):
 execute-cheaper init --chain agy --verify claude-login
-# Cursor first, opencode's free models as fallback (the chain in the demo GIF, plus opencode):
+# Cursor first, then opencode's free models, then Copilot:
 execute-cheaper init --chain cursor,opencode,copilot --verify claude-login
 ```
 
@@ -109,6 +106,17 @@ contract, launches `execute-cheaper` in the background and reads only the verdic
 Then ask for it in plain words ("run this plan cheaply", "let Codex implement it, I'm close to my
 usage limit"). The skills are plain `SKILL.md` files in [`plugin/skills/`](plugin/skills/): `execute-cheaper`
 runs plans, `setup` (`/execute-cheaper:setup`) configures your routes from the chat.
+
+## Example: a plan from Opus, typed by Haiku, checked by Sonnet
+
+![cat PLAN.md shows a three-section plan to add VAT to a tiny invoices repo; execute-cheaper run hands it to claude -p --model haiku (10 s), then a separate claude -p --model sonnet verifies the diff and runs 2 checks: verified OK, $0 paid; git diff --stat shows the two files the plan named](docs/demo.gif)
+
+The plan is plain Markdown: two tasks, what is out of scope, one check. `execute-cheaper run`
+hands it to the first route in the chain (here your Claude Code login with Haiku), then a second
+process with no edit tools (Sonnet) compares `git diff` to the plan and runs the checks itself.
+The output is filtered to the progress lines, the verdict and the cost; the full `report.md` has
+the executor's notes and the verifier's findings. Real run in a throwaway repo, the ~20 s wait
+cut, recorded with [vhs](https://github.com/charmbracelet/vhs).
 
 ## What a run looks like
 

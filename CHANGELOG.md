@@ -4,6 +4,7 @@
 
 First public release.
 
+- README: social preview on top; new narrated demo in an "Example" section.
 - Subscription CLIs first: Codex CLI (`codex exec`), GitHub Copilot CLI, Google Antigravity (`agy`)
   and your own Claude Code login. Any Anthropic Messages-compatible endpoint (Anthropic, OpenRouter,
   DeepSeek, Z.ai, Ollama/LM Studio/LiteLLM proxy) as configurable API fallback.
