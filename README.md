@@ -118,6 +118,87 @@ The output is filtered to the progress lines, the verdict and the cost; the full
 the executor's notes and the verifier's findings. Real run in a throwaway repo, the ~20 s wait
 cut, recorded with [vhs](https://github.com/charmbracelet/vhs).
 
+## Goldfish mode: many small, forgetful executors and one reviewer
+
+```bash
+execute-cheaper run --plan plan.md --goldfish --elephant claude-login --trial week-1
+```
+
+Split the plan into `## Task N: …` sections; the text before the first task is the shared context.
+Each task gets a **fresh** executor that sees only the shared context and its own task: no
+CLAUDE.md, no settings, no hooks, and only six tools (Read, Edit, Write, Bash, Glob, Grep). With
+Haiku that cuts the fixed context per turn from 32k to 8.5k tokens. The deny rules for secrets
+still apply, passed with `--settings`. A task's `check:` line is run by execute-cheaper, not by
+a model. A failing check gets one more fresh attempt with the failure output, and a task that
+still fails stops the run before the review is paid for. The reviewer (`--elephant`, an alias of
+`--verify`) reads the combined diff once.
+
+```markdown
+# Plan: textstats helpers
+Repo layout, conventions and anything every task needs to know.
+
+## Task 1: word_count
+Add `word_count(text) -> int` to `textstats.py` and two tests.
+check: `python3 -m unittest -q`
+
+## Task 2: top_words
+…
+check: `python3 -m unittest -q`
+```
+
+`check:` lines work in normal runs too: after each execution round, every check in the plan runs.
+A failure becomes the findings of a repair round, and the model review is skipped. When all
+checks pass, their output goes to the reviewer, so it doesn't run them again.
+
+### Same model, different bill: `--chain auto`, `route` and `plan`
+
+With an `auto` block in the config, `run --chain auto` (or every run, with `"default": true`)
+picks the bill, not the model:
+
+- weekly subscription quota on pace with the week (read from a statusline JSON) → `subscription_chain`;
+- quota ahead of the week and this month's API spend within `monthly_usd × share of the month
+  elapsed (+ budget_lead)` → `api_chain` and `api_verify` (the same models on an API key);
+- neither → `fallback_chain`.
+
+`execute-cheaper route` prints the decision and why. `execute-cheaper plan "goal" -o plan.md`
+asks the planner (`planner.subscription` / `planner.api`, e.g. Fable on either bill) to read
+the repo with Read/Glob/Grep only and write a goldfish plan, with a `## Not delegated` section
+for whatever needs a person. `key_file` reads a key another tool already keeps.
+
+```json
+"auto": {"default": true, "statusline": "~/.local/state/herdr/plugins/herdr-agent-usage/claude-statusline.json",
+         "subscription_chain": ["haiku"], "subscription_verify": "claude-login",
+         "api_chain": ["haiku-api"], "api_verify": "sonnet-api", "fallback_chain": ["agy"]},
+"planner": {"subscription": "fable-login", "api": "fable-api"}
+```
+
+### Measuring it against how you work today
+
+- `--trial LABEL` tags a run, and `compare --by trial|mode|provider` puts the runs side by side:
+  verified runs, rounds, executor and reviewer cost, cost per verified run, and your score.
+- `rate RUN_ID 1-5 [--note …]` records whether the result was worth merging. That is the number
+  a reviewer can't give.
+- `quota --days 7 [--statusline FILE] [--snapshot --trial LABEL]` prices your interactive Claude
+  Code sessions from their transcripts, by project, model, and main thread vs subagents. That is
+  the baseline a cheaper workflow has to beat. `--snapshot` appends the totals to
+  `quota.jsonl`, so weeks can be compared.
+- `"budget": {"monthly_usd": 100, "extra_ledgers": ["~/.local/state/claude-api/usage.jsonl"]}`
+  skips paid routes once this month's spend (this ledger plus other tools' JSONL with `usd` or
+  `cost_usd`) reaches the cap.
+
+Sandbox, 2026-10-30. Same 3-task plan, Haiku 5.5 executes. The plan had a defect: without
+`tests/__init__.py`, its check discovered 0 tests.
+
+| Setup | Executor input tokens | Executor $eq | Reviewer $eq | Result |
+|---|---|---|---|---|
+| One executor, Sonnet reviews, no plan checks (0.1.0) | 348k | 0.014 | 0.094 | **false OK**: 0 tests discovered |
+| One executor, plan checks, Sonnet reviews | 469k (2 rounds) | 0.016 | 0.027 | OK, 7 tests |
+| Goldfish, Sonnet reviews | 228k | 0.012 | 0.029 | OK, 9 tests |
+| Goldfish, Opus reviews | 184k | 0.010 | 0.083 | OK, 9 tests |
+
+Figures are Claude Code's pay-as-you-go equivalents on a subscription. This is n=1 on a toy repo:
+it shows the mechanism, not a general saving.
+
 ## What a run looks like
 
 ```

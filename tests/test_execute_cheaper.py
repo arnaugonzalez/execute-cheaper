@@ -41,6 +41,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     #!/usr/bin/env bash
     schema=0; for a in "$@"; do [ "$a" = "--json-schema" ] && schema=1; done
     prompt="$(cat)"  # like `claude -p`, the prompt arrives on stdin
+    if [ -n "${FAKE_PROMPT_LOG:-}" ] && [ "$schema" = 0 ]; then printf '%s\n=====\n' "$prompt" >> "$FAKE_PROMPT_LOG"; fi
     if [ -n "${FAKE_ARGS_LOG:-}" ]; then { printf '%s|%s|' "$CLAUDE_CONFIG_DIR" "${ANTHROPIC_BASE_URL:-}"; printf '%q ' "$@"; echo "stdin_bytes=$(printf %s "$prompt" | wc -c | tr -d ' ')"; } >> "$FAKE_ARGS_LOG"; fi
     if [ "$schema" = 0 ]; then
       if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
@@ -49,6 +50,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
       case "${FAKE_EXEC:-ok}" in
         hang) sleep 30 ;;
         badjson) echo "Traceback: something exploded" ; exit 0 ;;
+        budget) echo '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":72,"total_cost_usd":3.33,"errors":["Reached maximum budget ($3)"],"usage":{"input_tokens":50,"output_tokens":10}}'; exit 1 ;;
+        plan) echo '{"type":"result","is_error":false,"result":"# Plan: x\nctx\n## Task 1: a\ncheck: `true`\n## Not delegated\nNone.","total_cost_usd":0.8,"usage":{"input_tokens":50,"output_tokens":10}}'; exit 0 ;;
       esac
       echo "done via ${ANTHROPIC_BASE_URL:-login}" > cheap-was-here.txt
       [ "${FAKE_EXEC:-ok}" = commit ] && git add cheap-was-here.txt && git -c user.name=t -c user.email=t@t commit -qm exec
@@ -132,7 +135,9 @@ def provider(**kw):
     return base
 
 
-class CheapExecTest(unittest.TestCase):
+class RepoCase(unittest.TestCase):
+    """Temp git repo, fake binaries and isolated XDG dirs; no tests of its own."""
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="execute-cheaper-"))
         self.bin = self.tmp / "bin"
@@ -200,6 +205,9 @@ class CheapExecTest(unittest.TestCase):
     def ledger(self):
         return [json.loads(line) for line in (self.state / "ledger.jsonl").read_text().splitlines()]
 
+
+
+class CheapExecTest(RepoCase):
     # --- fallback, cooldowns, watchdog -------------------------------------
 
     def test_agy_quota_hang_falls_back_and_verifies(self):
@@ -666,6 +674,232 @@ class CheapExecTest(unittest.TestCase):
 
 KEY_VARS = ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "ANTHROPIC_API_KEY")
 SECRET = "sk-should-never-be-printed-42"
+
+
+class GoldfishTest(RepoCase):
+    PLAN = ("# Plan\nShared context: the repo is a toy.\n\n"
+            "## Task 1: first file\nCreate cheap-was-here.txt.\ncheck: `test -f cheap-was-here.txt`\n\n"
+            "## Task 2: second file\nTouch it again.\ncheck: {check2}\n")
+
+    def setUp(self):
+        super().setUp()
+        self.config["chain"] = ["cheapapi"]
+        self.save_config()
+        self.prompts = self.tmp / "prompts.log"
+        self.args_log = self.tmp / "args.log"
+
+    def write_plan(self, check2="test -f cheap-was-here.txt"):
+        (self.repo / "GF.md").write_text(self.PLAN.format(check2=check2))
+
+    def run_gf(self, *extra):
+        return self.run_cli("run", "--plan", "GF.md", "--goldfish", *extra,
+                            extra_env={"FAKE_PROMPT_LOG": str(self.prompts), "FAKE_ARGS_LOG": str(self.args_log)})
+
+    def test_each_task_gets_a_fresh_lean_executor_and_one_review(self):
+        self.write_plan()
+        r = self.run_gf("--trial", "w1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("task 1 OK", r.stdout)
+        self.assertIn("task 2 OK", r.stdout)
+        prompts = [p for p in self.prompts.read_text().split("=====\n") if p.strip()]
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("Task 1: first file", prompts[0])
+        self.assertNotIn("Task 2", prompts[0])
+        self.assertIn("Task 2: second file", prompts[1])
+        self.assertNotIn("Task 1", prompts[1])
+        self.assertTrue(all("Shared context: the repo is a toy." in p for p in prompts))
+        exec_args = [line for line in self.args_log.read_text().splitlines() if "--json-schema" not in line]
+        self.assertEqual(len(exec_args), 2)
+        for line in exec_args:
+            self.assertIn(r"--tools Read\,Edit\,Write\,Bash\,Glob\,Grep", line)  # printf %q escapes commas
+            self.assertIn("--setting-sources ''", line)
+            self.assertIn("goldfish-settings.json", line)
+        rows = self.ledger()
+        self.assertEqual([e["task"] for e in rows if e["role"] == "executor"], [1, 2])
+        self.assertEqual(len([e for e in rows if e["role"] == "verifier"]), 1)
+        run = next(e for e in rows if e["role"] == "run")
+        self.assertEqual((run["mode"], run["tasks"], run["trial"], run["status"]), ("goldfish", 2, "w1", "verified OK"))
+
+    def test_failing_check_gets_one_retry_and_no_review(self):
+        self.write_plan(check2="false")
+        r = self.run_gf()
+        self.assertEqual(r.returncode, ce.EXIT_NOT_VERIFIED, r.stdout + r.stderr)
+        self.assertIn("goldfish: task 2 check failed", r.stdout)
+        rows = self.ledger()
+        self.assertEqual([e["task"] for e in rows if e["role"] == "executor"], [1, 2, 2])
+        self.assertFalse([e for e in rows if e["role"] == "verifier"])
+        self.assertIn("A previous attempt left this check failing", self.prompts.read_text().split("=====\n")[2])
+
+    def test_plan_without_tasks_is_rejected(self):
+        r = self.run_cli("run", "--plan", "PLAN.md", "--goldfish")
+        self.assertEqual(r.returncode, ce.EXIT_CONFIG)
+        self.assertIn("## Task", r.stderr)
+
+    def test_parse_tasks(self):
+        ctx, tasks = ce.parse_tasks("intro\n## Tarea 1\nhaz x\n- check: pytest -q\n## Task 2\nno check\n")
+        self.assertEqual(ctx, "intro")
+        self.assertEqual([t["check"] for t in tasks], ["pytest -q", None])
+        _, tasks = ce.parse_tasks("## Task 1\ncheck: `python3 -c \"a=1\ntry: pass\nexcept: pass\" && true`\n")
+        self.assertEqual(tasks[0]["check"], 'python3 -c "a=1\ntry: pass\nexcept: pass" && true')
+
+
+class PlanChecksTest(RepoCase):
+    def setUp(self):
+        super().setUp()
+        self.config["chain"] = ["cheapapi"]
+        self.save_config()
+
+    def run_plan(self, check):
+        (self.repo / "PLAN.md").write_text(f"# Plan\n- T1 create a file\ncheck: `{check}`\n")
+        prompts = self.tmp / "verify-args.log"
+        r = self.run_cli("run", "--plan", "PLAN.md", extra_env={"FAKE_ARGS_LOG": str(prompts)})
+        return r, [e for e in self.ledger() if e["role"] == "verifier"]
+
+    def test_failing_check_repairs_without_paying_the_reviewer(self):
+        r, verifier_rows = self.run_plan("false")
+        self.assertEqual(r.returncode, ce.EXIT_NOT_VERIFIED, r.stdout + r.stderr)
+        self.assertIn("plan checks failed", r.stdout)
+        self.assertIn("Verification (checks): **regression**", r.stdout)
+        self.assertEqual(len([e for e in self.ledger() if e["role"] == "executor"]), 2)  # repair round ran
+        self.assertFalse(verifier_rows)
+
+    def test_passing_checks_are_handed_to_the_reviewer(self):
+        r, verifier_rows = self.run_plan("test -f cheap-was-here.txt")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(verifier_rows), 1)
+        prompt = next((self.state / "runs").glob("*/r1/verify-prompt.md")).read_text()
+        self.assertIn("already run by execute-cheaper", prompt)
+        self.assertIn("`test -f cheap-was-here.txt`", prompt)
+
+
+class RouteTest(RepoCase):
+    def setUp(self):
+        super().setUp()
+        self.status = self.tmp / "statusline.json"
+        self.config.update(
+            budget={"monthly_usd": 100},
+            auto={"statusline": str(self.status), "subscription_chain": ["agy"], "api_chain": ["cheapapi"],
+                  "fallback_chain": ["agy"], "api_verify": "judge", "margin": 0.0, "budget_lead": 1.0},
+            planner={"subscription": "judge", "api": "judge"})
+        self.save_config()
+
+    def quota(self, used, elapsed, fetched_ago=60):
+        t = __import__("time").time()
+        self.status.write_text(json.dumps({"fetched_at_unix": t - fetched_ago, "windows": [
+            {"kind": "weekly", "used_percent": used, "resets_at": t + (1 - elapsed) * 7 * 86400}]}))
+
+    def route(self):
+        with mock.patch.object(ce, "CONFIG_PATH", self.cfg / "config.json"), \
+             mock.patch.object(ce, "LEDGER_PATH", self.state / "ledger.jsonl"):
+            return ce.pick_route(ce.load_config())
+
+    def test_on_pace_uses_the_subscription(self):
+        self.quota(used=30, elapsed=0.5)
+        self.assertEqual(self.route()["route"], "subscription")
+
+    def test_ahead_of_pace_bills_the_api(self):
+        self.quota(used=80, elapsed=0.5)
+        r = self.route()
+        self.assertEqual((r["route"], r["chain"], r["verify"]), ("api", ["cheapapi"], "judge"))
+
+    def test_ahead_with_no_budget_left_falls_back(self):
+        self.config["budget"]["monthly_usd"] = 0
+        self.save_config()
+        self.quota(used=80, elapsed=0.5)
+        self.assertEqual(self.route()["route"], "fallback")
+
+    def test_stale_reading_stays_on_subscription(self):
+        self.quota(used=99, elapsed=0.1, fetched_ago=7 * 3600)
+        self.assertIn("no fresh quota reading", self.route()["reason"])
+
+    def test_chain_auto_records_the_route(self):
+        self.quota(used=80, elapsed=0.5)
+        r = self.run_cli("run", "--plan", "PLAN.md", "--chain", "auto")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("route: weekly quota 80% vs 50% of the week", r.stderr + r.stdout)
+        run = next(e for e in self.ledger() if e["role"] == "run")
+        self.assertEqual((run["route"], run["provider"]), ("api", "cheapapi"))
+
+    def test_plan_writes_a_goldfish_plan_read_only(self):
+        self.quota(used=10, elapsed=0.5)
+        args = self.tmp / "args.log"
+        r = self.run_cli("plan", "add a thing", "-o", "OUT.md", extra_env={"FAKE_EXEC": "plan", "FAKE_ARGS_LOG": str(args)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("1 tasks", r.stdout)
+        self.assertIn("## Task 1: a", (self.repo / "OUT.md").read_text())
+        log = args.read_text()
+        self.assertIn(r"--tools Read\,Glob\,Grep", log)
+        self.assertIn("--setting-sources project", log)
+        self.assertEqual([e["role"] for e in self.ledger()], ["planner"])
+
+    def test_plan_without_tasks_fails(self):
+        r = self.run_cli("plan", "x", "-o", "OUT.md")  # the fake answers with a run report, not a plan
+        self.assertEqual(r.returncode, ce.EXIT_CONFIG)
+        self.assertFalse((self.repo / "OUT.md").exists())
+
+    def test_plan_budget_exhaustion_is_explained(self):
+        args, prompts = self.tmp / "args.log", self.tmp / "prompts.log"
+        r = self.run_cli("plan", "x", "-o", "OUT.md", "--max-budget", "7.5",
+                         extra_env={"FAKE_EXEC": "budget", "FAKE_ARGS_LOG": str(args), "FAKE_PROMPT_LOG": str(prompts)})
+        self.assertEqual(r.returncode, ce.EXIT_CONFIG)
+        out = r.stdout + r.stderr
+        for needle in ("error_max_budget_usd", "Reached maximum budget", "72 turns", "$3.33", "--max-budget"):
+            self.assertIn(needle, out)
+        self.assertIn("--max-budget-usd 7.5", args.read_text())
+        self.assertIn("about $7.5", prompts.read_text())
+        self.assertFalse((self.repo / "OUT.md").exists())
+
+    def test_failure_detail_never_blank(self):
+        self.assertIn("error_max_budget_usd", ce.failure_detail(
+            {"subtype": "error_max_budget_usd", "errors": ["Reached maximum budget ($3)"], "num_turns": 72,
+             "total_cost_usd": 3.33}, "", ""))
+        self.assertEqual(ce.failure_detail({}, "", None), "no error detail in stdout or stderr")
+
+    def test_key_file(self):
+        kf = self.tmp / "api_key"
+        kf.write_text("sk-test\n")
+        self.assertEqual(ce.provider_key({"key_env": "NOPE_X", "key_file": str(kf)}, {}), "sk-test")
+        self.assertIsNone(ce.provider_key({"key_file": str(self.tmp / "missing")}, {}))
+
+
+class BudgetRatingQuotaTest(RepoCase):
+    def test_monthly_budget_skips_paid_routes(self):
+        extra = self.tmp / "other-tools.jsonl"
+        extra.write_text(json.dumps({"ts": int(__import__("time").time()), "usd": 2.5}) + "\n"
+                         + json.dumps({"ts": "2001-01-01T00:00:00Z", "usd": 99}) + "\n")
+        self.config.update(chain=["cheapapi", "agy"], budget={"monthly_usd": 2.0, "extra_ledgers": [str(extra)]})
+        self.save_config()
+        r = self.run_cli("run", "--plan", "PLAN.md", "--verify", "none")
+        self.assertIn("cheapapi: monthly budget reached ($2.50 of $2.00)", r.stdout)
+        self.assertIn("agy: OK", r.stdout)
+
+    def test_rate_feeds_compare_by_mode(self):
+        self.run_cli("run", "--plan", "PLAN.md")
+        run_id = next(e["run_id"] for e in self.ledger() if e["role"] == "run")
+        self.assertEqual(self.run_cli("rate", run_id, "4", "--note", "merged as is").returncode, 0)
+        self.assertEqual(self.run_cli("rate", "nope", "4").returncode, ce.EXIT_CONFIG)
+        self.assertEqual(self.run_cli("rate", run_id, "9").returncode, ce.EXIT_CONFIG)
+        out = json.loads(self.run_cli("compare", "--by", "mode", "--json").stdout)
+        self.assertEqual(out["single"]["human_score"], 4)
+        self.assertEqual(out["single"]["rated"], 1)
+        self.assertEqual(self.run_cli("usage").returncode, 0)  # rating rows have no provider
+
+    def test_quota_prices_transcripts_and_dedupes(self):
+        proj = self.tmp / "projects"
+        main = proj / "-home-x-code-alpha" / "s1.jsonl"
+        sub = proj / "-home-x-code-alpha" / "s1" / "subagents" / "agent-1.jsonl"
+        sub.parent.mkdir(parents=True)
+        ts = ce.iso(ce.now())
+        opus = {"timestamp": ts, "message": {"id": "m1", "model": "claude-opus-5-5",
+                                              "usage": {"input_tokens": 0, "output_tokens": 1_000_000}}}
+        main.write_text(json.dumps(opus) + "\n" + json.dumps(opus) + "\n")  # same id twice: counted once
+        sub.write_text(json.dumps({"timestamp": ts, "message": {"id": "m2", "model": "claude-haiku-5-5",
+                       "usage": {"input_tokens": 1_000_000, "output_tokens": 0}}}) + "\n")
+        text, data = ce.quota_summary(7, proj, None)
+        self.assertAlmostEqual(data["family"]["opus"], 20.0)
+        self.assertAlmostEqual(data["where"]["sub"], 0.10)
+        self.assertAlmostEqual(data["total_usd_eq"], 20.1)
+        self.assertIn("alpha", text)
 
 
 class InitTest(unittest.TestCase):

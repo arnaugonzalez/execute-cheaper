@@ -273,8 +273,9 @@ def validate_config(cfg: dict) -> list[str]:
         for tier in TIERS:
             if not models.get(tier):
                 errs.append(f"providers.{name}.models.{tier} is missing")
-        if p.get("kind") == "claude" and not (p.get("use_login") or p.get("key_env") or p.get("base_url")):
-            errs.append(f"providers.{name}: set 'key_env' (API key variable), 'base_url' or 'use_login': true")
+        if p.get("kind") == "claude" and not (p.get("use_login") or p.get("key_env") or p.get("key_file")
+                                               or p.get("base_url")):
+            errs.append(f"providers.{name}: set 'key_env' (API key variable), 'key_file', 'base_url' or 'use_login': true")
     return errs
 
 
@@ -293,7 +294,11 @@ def load_env() -> dict:
 
 def provider_key(pcfg: dict, secrets: dict) -> str | None:
     k = pcfg.get("key_env")
-    return (secrets.get(k) or os.environ.get(k)) if k else None
+    key = (secrets.get(k) or os.environ.get(k)) if k else None
+    if not key and pcfg.get("key_file"):  # a key another tool already keeps, read without copying it
+        path = Path(pcfg["key_file"]).expanduser()
+        key = path.read_text(encoding="utf-8").strip() if path.exists() else None
+    return key
 
 
 def load_state() -> dict:
@@ -487,6 +492,84 @@ def executor_profile_settings() -> dict:
     }
 
 
+GOLDFISH_PREAMBLE = """You are a GOLDFISH executor: you get ONE task of a larger plan, you will not remember it
+afterwards, and a senior reviewer (the elephant) checks the combined result of every task.
+
+Rules:
+1. Do ONLY the task below. Open only the files it names, unless the change cannot be made without another.
+2. Do not redesign, rename or refactor anything the task does not name. Do not commit or push.
+3. Run the task's `check:` command before finishing; if it fails because of your change, fix your change.
+4. Final report ≤ 10 lines: files changed, check → result, anything you could not do and why.
+"""
+GOLDFISH_TOOLS = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
+PLANNER_TOOLS = ["Read", "Glob", "Grep"]
+PLAN_GOAL_WARN_CHARS = 3000
+
+PLANNER_PROMPT = """You are the PLANNER (the elephant). Read this repository as needed and write an execution plan
+for the goal below. Cheap, forgetful executors (goldfish) will implement it: each one sees ONLY the shared
+context and ONE task, with no memory of the repo, the other tasks or this conversation.
+
+Output only the plan, in Markdown, in exactly this shape:
+
+# Plan: <title>
+<shared context: the repo facts, conventions, commands and constraints that every task needs>
+
+## Task 1: <title>
+<exact files, functions and behaviour to change; what not to touch>
+check: `<one single-line shell command that exits 0 only when this task is done right>`
+
+## Task 2: ...
+
+## Not delegated
+<anything that needs a human or architectural decision, a secret, production access or judgement you cannot
+pin down: say what and why. Leave such work out of the tasks. Write "None." if everything is delegable.>
+
+Rules: tasks must be small and ordered; each one must pass its check on its own, on top of the earlier tasks.
+Never put a decision inside a task. Prefer checks that run existing tests or grep for an exact result.
+
+Exploration budget (hard): your total budget is about {budget} and the plan is lost if you run out before
+answering. Read only what the tasks need: at most ~25 tool calls (Grep/Glob before Read, line ranges not whole
+files). After that, stop exploring and write the plan. If the goal is too large to plan within that, plan
+the most valuable first slice as the tasks and list the rest under "## Not delegated" as follow-up plans.
+"""
+TASK_RE = re.compile(r"^##\s+(?:Task|Tarea)\b.*$", re.M | re.I)
+# `check: \`cmd\`` may span lines inside the backticks; without backticks it is the rest of the line.
+CHECK_RE = re.compile(r"^\s*(?:[-*]\s*)?check:\s*(?:`([^`]+)`|(.+?))\s*$", re.M | re.I)
+
+
+def check_cmd(m: re.Match) -> str:
+    return (m.group(1) or m.group(2)).strip()
+
+
+def parse_tasks(plan: str) -> tuple[str, list[dict]]:
+    """Split a goldfish plan into its shared context (text before the first `## Task`) and its tasks."""
+    heads = list(TASK_RE.finditer(plan))
+    tasks = []
+    for i, m in enumerate(heads):
+        body = plan[m.start(): heads[i + 1].start() if i + 1 < len(heads) else len(plan)].strip()
+        check = CHECK_RE.search(body)
+        tasks.append({"title": m.group(0).lstrip("#").strip(), "body": body,
+                      "check": check_cmd(check) if check else None})
+    return (plan[: heads[0].start()].strip() if heads else plan.strip()), tasks
+
+
+def build_goldfish_prompt(context: str, task: dict, failure: tuple[str, str] | None = None) -> str:
+    prompt = GOLDFISH_PREAMBLE + "\n## Shared context\n" + (context or "(none)") + "\n\n## Your task\n" + task["body"]
+    if failure:
+        prompt += (f"\n\n## A previous attempt left this check failing\n`{failure[0]}`\n```\n{failure[1]}\n```\n"
+                   "Fix only what makes this check fail.")
+    return prompt
+
+
+def run_check(cmd: str, cwd: Path, timeout_s: int) -> tuple[bool, str]:
+    """A task's acceptance check, run by us and not by a model: deterministic and free."""
+    try:
+        p = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout_s, check=False)
+    except subprocess.TimeoutExpired:
+        return False, f"timeout after {timeout_s} s"
+    return p.returncode == 0, ((p.stdout or "") + (p.stderr or ""))[-4000:]
+
+
 def build_exec_prompt(plan: str, findings: dict | None) -> str:
     if findings:
         return (REPAIR_PREAMBLE + "\n\n## Reviewer findings\n" +
@@ -495,9 +578,35 @@ def build_exec_prompt(plan: str, findings: dict | None) -> str:
     return EXEC_PREAMBLE + "\n## Plan (contract)\n" + plan
 
 
-def build_verify_prompt(plan: str, diff: str, untracked: str) -> str:
-    return (VERIFY_PROMPT + "\n## Plan\n" + plan + "\n\n## git diff (executor's changes)\n```diff\n" +
-            diff[:120_000] + "\n```\n\n## Untracked files\n" + (untracked[:20_000] or "(none)"))
+def build_verify_prompt(plan: str, diff: str, untracked: str, checks: list[tuple[str, str]] | None = None) -> str:
+    prompt = (VERIFY_PROMPT + "\n## Plan\n" + plan + "\n\n## git diff (executor's changes)\n```diff\n" +
+              diff[:120_000] + "\n```\n\n## Untracked files\n" + (untracked[:20_000] or "(none)"))
+    if checks:
+        prompt += ("\n\n## Plan checks already run by execute-cheaper (all passed; do not re-run them)\n" +
+                   "\n".join(f"- `{cmd}` → {out.strip()[-300:] or 'exit 0'}" for cmd, out in checks) +
+                   "\nReview what they cannot see: plan fidelity, scope and correctness. Do not fail the run for "
+                   "harmless extras (generated files, a small defensive check); list them in the summary instead.")
+    return prompt
+
+
+def plan_checks(plan: str) -> list[str]:
+    return list(dict.fromkeys(check_cmd(m) for m in CHECK_RE.finditer(plan)))
+
+
+def run_plan_checks(checks: list[str], cwd: Path, timeout_s: int) -> tuple[list[tuple[str, str]], dict | None]:
+    """Every `check:` of the plan, run by us after each execution round. A failure becomes the findings of a
+    repair round, so no model is paid to tell us what a shell exit code already says."""
+    passed = []
+    for cmd in checks:
+        ok, out = run_check(cmd, cwd, timeout_s)
+        log(f"plan check {'ok' if ok else 'FAILED'}: {cmd}")
+        if not ok:
+            return passed, {"verdict": "regression", "missing": [], "out_of_scope": [],
+                            "regressions": [f"`{cmd}` failed:\n{out[-1500:]}"],
+                            "checks_run": [f"{c} -> ok" for c, _ in passed] + [f"{cmd} -> FAILED"],
+                            "summary": "A plan check failed; the model review was skipped.", "by": "checks"}
+        passed.append((cmd, out))
+    return passed, None
 
 
 # --- adapter: agy -----------------------------------------------------------
@@ -605,7 +714,8 @@ def claude_env(pcfg: dict, key: str | None, model: str) -> tuple[dict, str | Non
 def run_claude(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, env: dict,
                config_dir: str | None, timeout_s: int, disallowed: list[str] | None = None,
                json_schema: dict | None = None, max_budget: float | None = None,
-               setting_sources: str = "user", bin_name: str = "claude", effort: str | None = None) -> dict:
+               setting_sources: str = "user", bin_name: str = "claude", effort: str | None = None,
+               tools: list[str] | None = None, settings_file: Path | None = None) -> dict:
     if config_dir:
         env = dict(env, CLAUDE_CONFIG_DIR=config_dir)
     # No --bare: bare mode ignores subscription logins and trims the executor's tools. Instead:
@@ -623,6 +733,10 @@ def run_claude(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str,
         cmd += ["--max-budget-usd", str(max_budget)]
     if effort:
         cmd += ["--effort", effort]
+    if tools:
+        cmd += ["--tools", ",".join(tools)]
+    if settings_file:
+        cmd += ["--settings", str(settings_file)]
     log(f"{label} > claude -p --model {model}" + (f" --effort {effort}" if effort else ""))
     try:
         proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout_s, check=False,
@@ -648,9 +762,29 @@ def run_claude(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str,
         is_err, text = True, ""
         reason = f"unparseable output: {(proc.stdout or '')[:200]!r}"
     else:
-        reason = None if not is_err else f"exit {proc.returncode}: {(text or proc.stderr or '')[:300]}"
+        reason = None if not is_err else f"exit {proc.returncode}: {failure_detail(data, text, proc.stderr)}"
     return {"ok": not is_err, "text": text, "structured": data.get("structured_output"), "reason": reason,
-            "cost_usd": data.get("total_cost_usd"), "usage": data.get("usage")}
+            "cost_usd": data.get("total_cost_usd"), "usage": data.get("usage"),
+            "subtype": data.get("subtype"), "num_turns": data.get("num_turns")}
+
+
+def failure_detail(data: dict, text: str, stderr: str | None) -> str:
+    """Why a `claude -p` run failed. Budget/turn limits arrive as JSON on stdout (`subtype`, `errors`) with an
+    empty `result` and an empty stderr, so reading only text/stderr used to yield a blank message."""
+    parts = []
+    if data.get("subtype") and data["subtype"] != "success":
+        parts.append(str(data["subtype"]))
+    parts += [str(e) for e in (data.get("errors") or [])]
+    if text or stderr:
+        parts.append((text or stderr or "").strip()[:300])
+    stats = []
+    if data.get("num_turns") is not None:
+        stats.append(f"{data['num_turns']} turns")
+    if data.get("total_cost_usd") is not None:
+        stats.append(f"${data['total_cost_usd']:.2f} spent")
+    if stats:
+        parts.append(f"({', '.join(stats)})")
+    return " ".join(parts) or "no error detail in stdout or stderr"
 
 
 # --- adapter: codex (OpenAI Codex CLI headless) -----------------------------
@@ -839,22 +973,31 @@ def run_cli(prompt: str, cwd: Path, run_dir: Path, label: str, *, model: str, pc
     return {"ok": True, "text": text, "reason": None, "usage": usage, "cost_usd": cost}
 
 
-def run_executor(name: str, pcfg: dict, prompt: str, cwd: Path, run_dir: Path, tier: str, secrets: dict) -> dict:
+def run_executor(name: str, pcfg: dict, prompt: str, cwd: Path, run_dir: Path, tier: str, secrets: dict,
+                 lean: bool = False) -> dict:
     model = pcfg["models"][tier]
     if pcfg["kind"] == "agy":
         return run_agy(prompt, cwd, run_dir, model, pcfg)
     if pcfg["kind"] == "codex":
         return run_codex(prompt, cwd, run_dir, name, model=model, pcfg=pcfg, timeout_s=pcfg.get("timeout_s", 3600))
     key = provider_key(pcfg, secrets)
-    if pcfg.get("key_env") and not key:
-        return {"ok": False, "text": "", "reason": f"missing key {pcfg['key_env']} (env or {ENV_PATH})"}
+    if (pcfg.get("key_env") or pcfg.get("key_file")) and not key:
+        return {"ok": False, "text": "", "reason": f"missing key {pcfg.get('key_env') or pcfg['key_file']}"}
     if pcfg["kind"] == "cli":
         return run_cli(prompt, cwd, run_dir, name, model=model, pcfg=pcfg, key=key)
     env, config_dir = claude_env(pcfg, key, model)
+    if lean:
+        # Goldfish: no user/project CLAUDE.md, settings or hooks and only the six editing tools (measured
+        # 2026-10-30 with Haiku: 32 k -> 8.5 k tokens of fixed context per turn). The deny rules for secrets
+        # come back through --settings, which applies even with no setting sources.
+        sfile = run_dir / "goldfish-settings.json"
+        sfile.write_text(json.dumps(executor_profile_settings()), encoding="utf-8")
+        ctx = {"setting_sources": "", "tools": GOLDFISH_TOOLS, "settings_file": sfile}
+    else:
+        ctx = {"setting_sources": "user", "disallowed": ["Agent", "Task"]}
     return run_claude(prompt, cwd, run_dir, name, model=model, env=env, config_dir=config_dir,
                       timeout_s=pcfg.get("timeout_s", 3600), max_budget=pcfg.get("max_budget_usd"),
-                      disallowed=["Agent", "Task"], setting_sources="user", bin_name=pcfg.get("bin", "claude"),
-                      effort=pcfg.get("effort"))
+                      bin_name=pcfg.get("bin", "claude"), effort=pcfg.get("effort"), **ctx)
 
 
 def verifier_model(cfg: dict) -> str:
@@ -863,7 +1006,7 @@ def verifier_model(cfg: dict) -> str:
 
 
 def run_verifier(plan: str, cwd: Path, run_dir: Path, cfg: dict, secrets: dict, label: str = "verify",
-                 base: str | None = None) -> dict:
+                 base: str | None = None, checks: list[tuple[str, str]] | None = None) -> dict:
     # Diffing against the run's starting commit keeps work the executor committed itself visible.
     diff = git(cwd, "diff", base) if base else git(cwd, "diff") + git(cwd, "diff", "--cached")
     untracked = git(cwd, "ls-files", "--others", "--exclude-standard")
@@ -874,10 +1017,10 @@ def run_verifier(plan: str, cwd: Path, run_dir: Path, cfg: dict, secrets: dict, 
     name = cfg["verify"]["provider"]
     pcfg = cfg["providers"][name]
     key = provider_key(pcfg, secrets)
-    if pcfg.get("key_env") and not key:
-        return {"ok": False, "reason": f"missing key {pcfg['key_env']} for verifier '{name}'"}
+    if (pcfg.get("key_env") or pcfg.get("key_file")) and not key:
+        return {"ok": False, "reason": f"missing key {pcfg.get('key_env') or pcfg['key_file']} for verifier '{name}'"}
     model = verifier_model(cfg)
-    prompt = build_verify_prompt(plan, diff, untracked)
+    prompt = build_verify_prompt(plan, diff, untracked, checks)
     (run_dir / f"{label}-prompt.md").write_text(prompt, encoding="utf-8")
     if pcfg["kind"] == "codex":
         return run_codex(prompt, cwd, run_dir, label, model=model, pcfg=pcfg, read_only=True,
@@ -893,8 +1036,92 @@ def run_verifier(plan: str, cwd: Path, run_dir: Path, cfg: dict, secrets: dict, 
 
 # --- orchestration ----------------------------------------------------------
 
+def _ts_epoch(ts) -> float:
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def month_spend(cfg: dict) -> float:
+    """Money spent this calendar month (UTC) on paid routes: this ledger plus the config's
+    `budget.extra_ledgers` (JSONL files from other tools that bill the same key; `usd` or `cost_usd`)."""
+    start = now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+    total = sum(e.get("cost_usd") or 0.0 for e in ledger_read(32)
+                if e.get("billing") == "paid" and e.get("role") in ("executor", "verifier")
+                and _ts_epoch(e.get("ts")) >= start)
+    for extra in (cfg.get("budget") or {}).get("extra_ledgers", []):
+        path = Path(extra).expanduser()
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(e, dict) and _ts_epoch(e.get("ts")) >= start:
+                total += float(e.get("usd") or e.get("cost_usd") or 0.0)
+    return total
+
+
+def budget_block(cfg: dict, pcfg: dict) -> str | None:
+    cap = (cfg.get("budget") or {}).get("monthly_usd")
+    if cap is None or pcfg.get("billing", "paid") != "paid":
+        return None
+    spent = month_spend(cfg)
+    return f"monthly budget reached (${spent:.2f} of ${cap:.2f})" if spent >= cap else None
+
+
+def weekly_pace(statusline: Path) -> tuple[float, float] | None:
+    """(share of the weekly quota used, share of the week elapsed), from a statusline JSON with a
+    `weekly` window (`used_percent`, `resets_at`). None when the file is missing or stale (> 6 h)."""
+    try:
+        data = json.loads(statusline.expanduser().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if time.time() - (data.get("fetched_at_unix") or 0) > 6 * 3600:
+        return None
+    w = next((w for w in data.get("windows", []) if w.get("kind") == "weekly"), None)
+    if not w or not w.get("resets_at"):
+        return None
+    elapsed = 1 - (w["resets_at"] - time.time()) / (7 * 86400)
+    return w["used_percent"] / 100, min(max(elapsed, 0.0), 1.0)
+
+
+def pick_route(cfg: dict) -> dict:
+    """Same models, different bill. While the subscription's weekly quota keeps pace with the week, use
+    it. When it runs ahead, bill the same work to the API, but only while the month's API spend keeps pace
+    with the month. Otherwise, fall back to the free chain."""
+    auto = cfg.get("auto") or {}
+    sub = {"route": "subscription", "chain": auto.get("subscription_chain") or cfg["chain"],
+           "verify": auto.get("subscription_verify")}
+    pace = weekly_pace(Path(auto["statusline"])) if auto.get("statusline") else None
+    if pace is None:
+        return dict(sub, reason="no fresh quota reading: subscription")
+    used, elapsed = pace
+    margin = auto.get("margin", 0.05)
+    if used <= elapsed + margin:
+        return dict(sub, reason=f"weekly quota {used:.0%} vs {elapsed:.0%} of the week: subscription")
+    cap = (cfg.get("budget") or {}).get("monthly_usd")
+    t = now()
+    days = (t.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - t.replace(day=1)
+    month_frac = (t - t.replace(day=1, hour=0, minute=0, second=0, microsecond=0)) / days
+    allowance = cap * min(month_frac + auto.get("budget_lead", 0.1), 1.0) if cap else 0.0
+    spent = month_spend(cfg)
+    ahead = f"weekly quota {used:.0%} vs {elapsed:.0%} of the week"
+    if auto.get("api_chain") and spent < allowance:
+        return {"route": "api", "chain": auto["api_chain"], "verify": auto.get("api_verify"),
+                "reason": f"{ahead}; API ${spent:.2f} of ${allowance:.2f} allowed so far: API"}
+    return {"route": "fallback", "chain": auto.get("fallback_chain") or sub["chain"],
+            "verify": auto.get("subscription_verify"),
+            "reason": f"{ahead}; API ${spent:.2f} of ${allowance:.2f} allowed so far: fallback"}
+
+
 def execute_chain(prompt: str, cwd: Path, run_dir: Path, tier: str, cfg: dict, secrets: dict,
-                  chain: list[str], run_id: str, round_no: int, hook: str | None) -> dict:
+                  chain: list[str], run_id: str, round_no: int, hook: str | None,
+                  lean: bool = False, subdir: str | None = None, ledger_extra: dict | None = None) -> dict:
     attempts = []
     for prov in chain:
         left = cooldown_left(prov)
@@ -903,11 +1130,16 @@ def execute_chain(prompt: str, cwd: Path, run_dir: Path, tier: str, cfg: dict, s
             log(f"{prov} skipped: cooldown {left // 60} min")
             continue
         pcfg = cfg["providers"][prov]
-        rdir = run_dir / f"r{round_no}"
+        blocked = budget_block(cfg, pcfg)
+        if blocked:
+            attempts.append({"provider": prov, "reason": blocked})
+            log(f"{prov} skipped: {blocked}")
+            continue
+        rdir = run_dir / (subdir or f"r{round_no}")
         rdir.mkdir(parents=True, exist_ok=True)
         before = git(cwd, "status", "--porcelain")
         t0 = time.monotonic()
-        res = run_executor(prov, pcfg, prompt, cwd, rdir, tier, secrets)
+        res = run_executor(prov, pcfg, prompt, cwd, rdir, tier, secrets, lean=lean)
         res["provider"], res["seconds"] = prov, int(time.monotonic() - t0)
         # Some executors report an error on their LAST message after doing all the work (e.g. a
         # content filter). If the tree changed, the verifier decides, not the exit code.
@@ -922,7 +1154,8 @@ def execute_chain(prompt: str, cwd: Path, run_dir: Path, tier: str, cfg: dict, s
             res["cost_usd"] = 0.0  # never started (binary not found, missing key): nothing was spent
         ledger_append({"ts": iso(now()), "run_id": run_id, "role": "executor", "provider": prov, "model": model,
                        "billing": pcfg.get("billing", "paid"), "round": round_no, "ok": res["ok"],
-                       **res["tokens"], "cost_usd": res["cost_usd"], "seconds": res["seconds"]})
+                       **res["tokens"], "cost_usd": res["cost_usd"], "seconds": res["seconds"],
+                       **(ledger_extra or {})})
         attempt = {k: res.get(k) for k in ("provider", "ok", "reason", "seconds", "cost_usd", "tokens")}
         attempts.append(attempt)
         emit(hook, "attempt", run_id=run_id, round=round_no, **attempt)
@@ -937,6 +1170,39 @@ def execute_chain(prompt: str, cwd: Path, run_dir: Path, tier: str, cfg: dict, s
         else:
             log(f"{prov} failed: {res.get('reason')}")
     return {"result": None, "attempts": attempts}
+
+
+def run_goldfish(context: str, tasks: list[dict], cwd: Path, run_dir: Path, tier: str, cfg: dict, secrets: dict,
+                 run_id: str, hook: str | None, check_timeout: int) -> dict:
+    """One fresh executor per task, each seeing only the shared context and its own task. A failing
+    `check:` gets one more fresh attempt with the failure output; a task that still fails stops the run
+    before the (expensive) review."""
+    attempts, results = [], []
+    for n, task in enumerate(tasks, 1):
+        failure, ok, out, tries = None, False, "", 0
+        for tries in (1, 2):
+            ex = execute_chain(build_goldfish_prompt(context, task, failure), cwd, run_dir, tier, cfg, secrets,
+                               cfg["chain"], run_id, 1, hook, lean=True, subdir=f"r1-t{n}-a{tries}",
+                               ledger_extra={"task": n, "mode": "goldfish"})
+            attempts += [dict(a, task=n) for a in ex["attempts"]]
+            if not ex["result"]:
+                results.append({"n": n, "title": task["title"], "ok": False, "check": task["check"],
+                                "output": "no executor available", "tries": tries})
+                return {"ok": False, "attempts": attempts, "tasks": results}
+            if not task["check"]:
+                ok, out = True, "(no check)"
+                break
+            ok, out = run_check(task["check"], cwd, check_timeout)
+            log(f"task {n} check {'ok' if ok else 'FAILED'}: {task['check']}")
+            if ok:
+                break
+            failure = (task["check"], out[-2500:])
+        results.append({"n": n, "title": task["title"], "ok": ok, "check": task["check"],
+                        "output": out[-1500:], "tries": tries})
+        emit(hook, "task", run_id=run_id, task=n, ok=ok, tries=tries)
+        if not ok:
+            return {"ok": False, "attempts": attempts, "tasks": results}
+    return {"ok": True, "attempts": attempts, "tasks": results}
 
 
 def write_report(run_dir: Path, summary: dict) -> Path:
@@ -955,6 +1221,11 @@ def write_report(run_dir: Path, summary: dict) -> Path:
             if a.get("ok") and a.get("reason"):
                 status += f" ({a['reason'][:160]})"
             lines.append(f"- {a['provider']}: {status}{extra}")
+        for t in r.get("tasks") or []:
+            lines.append(f"- task {t['n']} {'OK' if t['ok'] else 'FAILED'} ({t['tries']} tr{'y' if t['tries'] == 1 else 'ies'})"
+                         f": {t['title']}" + (f" · check `{t['check']}`" if t.get("check") else " · no check"))
+            if not t["ok"]:
+                lines += ["```", t["output"][-1500:], "```"]
         if r.get("executor_report"):
             lines += ["", "Executor report:", "```", r["executor_report"][:3000], "```"]
         v = r.get("verify")
@@ -1013,9 +1284,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not CONFIG_PATH.exists():
         raise ConfigError(f"no config at {CONFIG_PATH}: run `execute-cheaper init` first")
     cfg = load_config()
-    if args.chain:
+    route = None
+    if args.chain == "auto" or (not args.chain and (cfg.get("auto") or {}).get("default")):
+        route = pick_route(cfg)
+        cfg["chain"] = route["chain"]
+        if route.get("verify") and not (args.verify or getattr(args, "elephant", None)):
+            cfg["verify"].update(provider=route["verify"], model=None)
+        log(f"route: {route['reason']}")
+    elif args.chain:
         cfg["chain"] = [c.strip() for c in args.chain.split(",") if c.strip()]
     verify_off = args.verify == "none"
+    if getattr(args, "elephant", None):
+        args.verify = args.elephant
+        verify_off = args.verify == "none"
     if args.verify and not verify_off and args.verify != cfg["verify"].get("provider"):
         # A model pinned for the configured verifier means nothing to another provider.
         cfg["verify"].update(provider=args.verify, model=None)
@@ -1030,6 +1311,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         raise ConfigError(f"{cwd} is not a git repository: the verifier reviews `git diff`. Run `git init` first.")
     plan_path = Path(args.plan).resolve()
     plan = plan_path.read_text(encoding="utf-8")
+    goldfish = bool(getattr(args, "goldfish", False))
+    checks = plan_checks(plan)
+    context, tasks = parse_tasks(plan) if goldfish else ("", [])
+    if goldfish and not tasks:
+        raise ConfigError("--goldfish needs a plan with `## Task ...` sections (each with an optional `check:` line)")
     hook = args.on_event or cfg.get("on_event")
     run_id = now().strftime("%Y%m%d-%H%M%S") + f"-{re.sub(r'[^A-Za-z0-9_.-]', '_', cwd.name)}"
     run_dir = RUNS_DIR / run_id
@@ -1048,14 +1334,34 @@ def cmd_run(args: argparse.Namespace) -> int:
     emit(hook, "run_start", run_id=run_id, cwd=str(cwd), plan=str(plan_path), chain=cfg["chain"], run_dir=str(run_dir))
 
     for round_no in range(1, max_rounds + 1):
-        prompt = build_exec_prompt(plan, findings)
-        ex = execute_chain(prompt, cwd, run_dir, tier, cfg, secrets, cfg["chain"], run_id, round_no, hook)
-        rnd = {"round": round_no, "attempts": ex["attempts"]}
-        if not ex["result"]:
-            summary["status"] = "no executor available"
+        if goldfish and round_no == 1:
+            gf = run_goldfish(context, tasks, cwd, run_dir, tier, cfg, secrets, run_id, hook,
+                              args.check_timeout)
+            rnd = {"round": 1, "attempts": gf["attempts"], "tasks": gf["tasks"]}
+            if not gf["ok"]:
+                last = gf["tasks"][-1]
+                summary["status"] = ("no executor available" if last["output"] == "no executor available"
+                                     else f"goldfish: task {last['n']} check failed")
+                summary["rounds"].append(rnd)
+                break
+        else:
+            ex = execute_chain(build_exec_prompt(plan, findings), cwd, run_dir, tier, cfg, secrets, cfg["chain"],
+                               run_id, round_no, hook, lean=goldfish,
+                               ledger_extra={"mode": "goldfish"} if goldfish else None)
+            rnd = {"round": round_no, "attempts": ex["attempts"]}
+            if not ex["result"]:
+                summary["status"] = "no executor available"
+                summary["rounds"].append(rnd)
+                break
+            rnd["executor_report"] = ex["result"].get("text", "")
+        passed, failed = run_plan_checks(checks, cwd, args.check_timeout)
+        if failed:
+            rnd["verify"] = failed
             summary["rounds"].append(rnd)
-            break
-        rnd["executor_report"] = ex["result"].get("text", "")
+            findings = failed
+            summary["status"] = "plan checks failed"
+            log(f"plan checks failed -> {'repair round' if round_no < max_rounds else 'no rounds left'}")
+            continue
         if verify_off:
             summary["status"] = "executed (not verified)"
             summary["rounds"].append(rnd)
@@ -1067,7 +1373,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             summary["rounds"].append(rnd)
             break
         vpcfg, vmodel = cfg["providers"][vname], verifier_model(cfg)
-        vr = run_verifier(plan, cwd, run_dir / f"r{round_no}", cfg, secrets, base=summary["base"])
+        vdir = run_dir / f"r{round_no}"
+        vdir.mkdir(parents=True, exist_ok=True)  # goldfish rounds write per-task dirs, not r1/
+        vr = run_verifier(plan, cwd, vdir, cfg, secrets, base=summary["base"], checks=passed)
         vr["tokens"] = norm_usage(vr.get("usage"))
         vcost = attempt_cost(vpcfg, vmodel, vr) if vr.get("usage") else (0.0 if vr.get("structured") else None)
         ledger_append({"ts": iso(now()), "run_id": run_id, "role": "verifier", "provider": vname, "model": vmodel,
@@ -1113,7 +1421,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     done_by = [a["provider"] for r in summary["rounds"] for a in r["attempts"] if a.get("ok")]
     ledger_append({"ts": iso(now()), "run_id": run_id, "role": "run", "provider": done_by[0] if done_by else None,
                    "plan": str(plan_path), "tier": tier, "status": summary["status"],
-                   "rounds": len(summary["rounds"]), "files": len(changed), "seconds": summary["elapsed_s"]})
+                   "rounds": len(summary["rounds"]), "files": len(changed), "seconds": summary["elapsed_s"],
+                   "mode": "goldfish" if goldfish else "single", "trial": getattr(args, "trial", None),
+                   "route": route["route"] if route else None,
+                   "tasks": len(tasks) or None,
+                   "verifier": None if verify_off else f"{cfg['verify']['provider']}/{verifier_model(cfg)}"})
     emit(hook, "run_end", run_id=run_id, status=summary["status"], exit_code=code, report=str(report),
          files=changed, elapsed_s=summary["elapsed_s"], cost=summary["cost"])
     print()
@@ -1192,8 +1504,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             auth = "own Claude Code login"
         elif p.get("kind") in ("codex", "agy") or (p.get("kind") == "cli" and not p.get("key_env")):
             auth = f"own {binary} login"
-        elif p.get("key_env"):
-            auth = f"{p['key_env']} {'present' if provider_key(p, secrets) else 'MISSING'}"
+        elif p.get("key_env") or p.get("key_file"):
+            auth = f"{p.get('key_env') or p['key_file']} {'present' if provider_key(p, secrets) else 'MISSING'}"
         elif p.get("base_url"):
             auth = f"no key needed ({p['base_url']})"
         else:
@@ -1217,7 +1529,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def usage_summary(days: int) -> tuple[str, dict]:
-    rows = [e for e in ledger_read(days) if e.get("role") != "run"]  # run rows are outcomes, not calls
+    rows = [e for e in ledger_read(days) if e.get("role") in ("executor", "verifier", "planner")]  # calls
     agg: dict[str, dict] = {}
     for e in rows:
         a = agg.setdefault(e["provider"], {"calls": 0, "input": 0, "cached": 0, "output": 0, "cost": 0.0,
@@ -1240,8 +1552,9 @@ def usage_summary(days: int) -> tuple[str, dict]:
     return "\n".join(lines), {k: {**v, "runs": len(v["runs"])} for k, v in agg.items()}
 
 
-def compare_summary(days: int) -> tuple[str, dict]:
-    """Executors side by side: outcome per run plus what each run cost to execute and to verify."""
+def compare_summary(days: int, by: str = "provider") -> tuple[str, dict]:
+    """Runs side by side, grouped by executor (`provider`), `mode` (single/goldfish) or `trial` label:
+    outcome, what executing and verifying cost, cost per verified run and the human score (`rate`)."""
     rows = ledger_read(days)
     spend: dict[str, dict] = {}
     for e in rows:
@@ -1250,12 +1563,14 @@ def compare_summary(days: int) -> tuple[str, dict]:
             r[e["role"]] += e.get("cost_usd") or 0.0
             if e["role"] == "executor":
                 r["tokens_out"] += e.get("output", 0)
+    scores = {e["run_id"]: e["score"] for e in rows if e.get("role") == "rating"}  # the last rating wins
+    default = {"mode": "single"}.get(by, "none")
     agg: dict[str, dict] = {}
     for e in rows:
         if e.get("role") != "run":
             continue
-        a = agg.setdefault(e.get("provider") or "none", {"runs": 0, "ok": 0, "rounds": 0, "seconds": [],
-                                                         "executor_usd": 0.0, "verifier_usd": 0.0, "tokens_out": 0})
+        a = agg.setdefault(e.get(by) or default, {"runs": 0, "ok": 0, "rounds": 0, "seconds": [], "executor_usd": 0.0,
+                                                  "verifier_usd": 0.0, "tokens_out": 0, "scores": []})
         sp = spend.get(e["run_id"], {})
         a["runs"] += 1
         a["ok"] += e.get("status") == "verified OK"
@@ -1264,22 +1579,196 @@ def compare_summary(days: int) -> tuple[str, dict]:
         a["executor_usd"] += sp.get("executor", 0.0)
         a["verifier_usd"] += sp.get("verifier", 0.0)
         a["tokens_out"] += sp.get("tokens_out", 0)
-    lines = [f"execute-cheaper compare · last {days} days",
-             "| executor | runs | verified OK | rounds/run | median s | executor $ | verifier $ | out tokens |",
-             "|---|---|---|---|---|---|---|---|"]
+        if e["run_id"] in scores:
+            a["scores"].append(scores[e["run_id"]])
+    lines = [f"execute-cheaper compare by {by} · last {days} days",
+             f"| {by} | runs | verified OK | rounds/run | median s | executor $ | verifier $ | $/verified "
+             "| out tokens | human score |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for name, a in sorted(agg.items()):
-        secs = sorted(a["seconds"])
+        secs = sorted(a.pop("seconds"))
         a["median_s"] = secs[len(secs) // 2] if secs else 0
+        a["usd_per_verified"] = (a["executor_usd"] + a["verifier_usd"]) / a["ok"] if a["ok"] else None
+        sc = a.pop("scores")
+        a["human_score"] = round(sum(sc) / len(sc), 2) if sc else None
+        a["rated"] = len(sc)
+        per_ok = "-" if a["usd_per_verified"] is None else f"{a['usd_per_verified']:.3f}"
+        human = "-" if not sc else f"{a['human_score']} ({len(sc)})"
         lines.append(f"| {name} | {a['runs']} | {a['ok']}/{a['runs']} | {a['rounds'] / a['runs']:.1f} | {a['median_s']} "
-                     f"| {a['executor_usd']:.3f} | {a['verifier_usd']:.3f} | {a['tokens_out']} |")
-        del a["seconds"]
+                     f"| {a['executor_usd']:.3f} | {a['verifier_usd']:.3f} | {per_ok} | {a['tokens_out']} | {human} |")
     lines.append("Executor $ for subscription providers is Claude Code's pay-as-you-go equivalent, not money spent.")
     return "\n".join(lines), agg
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    text, agg = compare_summary(args.days)
+    text, agg = compare_summary(args.days, args.by)
     print(json.dumps(agg, indent=1) if args.json else text)
+    return EXIT_OK
+
+
+def cmd_rate(args: argparse.Namespace) -> int:
+    """A person's 1-5 score for a run's result: the number the verifier cannot give (was it worth merging?)."""
+    if not 1 <= args.score <= 5:
+        raise ConfigError("score must be 1-5")
+    if not any(e.get("run_id") == args.run and e.get("role") == "run" for e in ledger_read(3650)):
+        raise ConfigError(f"no run {args.run} in the ledger (see `execute-cheaper status`)")
+    ledger_append({"ts": iso(now()), "run_id": args.run, "role": "rating", "score": args.score, "note": args.note})
+    print(f"rated {args.run}: {args.score}/5")
+    return EXIT_OK
+
+
+# USD per million tokens: input, output, cache read, cache write 5 min, cache write 1 h. Opus/Sonnet fitted on
+# billed `claude -p` runs, Haiku/Fable/Mythos solved from billed calls (2026-10-30).
+CLAUDE_PRICES = {
+    "haiku": (0.10, 0.50, 0.01, 0.125, 0.20),
+    "sonnet": (2.0, 10.0, 0.10, 2.5, 4.0),
+    "opus": (4.0, 20.0, 0.20, 5.0, 8.0),
+    "fable": (10.0, 50.0, 0.25, 12.5, 20.0),
+    "mythos": (10.0, 50.0, 0.25, 12.5, 20.0),
+}
+
+
+def usage_usd(family: str, u: dict) -> float:
+    pin, pout, pread, pw5, pw1 = CLAUDE_PRICES[family]
+    cc = u.get("cache_creation") or {}
+    w1 = cc.get("ephemeral_1h_input_tokens", 0) or 0
+    w5 = (u.get("cache_creation_input_tokens", 0) or 0) - w1
+    return (u.get("input_tokens", 0) * pin + u.get("output_tokens", 0) * pout +
+            u.get("cache_read_input_tokens", 0) * pread + w5 * pw5 + w1 * pw1) / 1e6
+
+
+def quota_summary(days: int, projects_dir: Path, statusline: Path | None) -> tuple[str, dict]:
+    """What interactive Claude Code costs at list prices, from the session transcripts: per project, model
+    family, and main thread vs subagents. The baseline a cheaper workflow has to beat."""
+    since = time.time() - days * 86400
+    seen: set[str] = set()
+    agg: dict[tuple, float] = {}
+    for f in projects_dir.glob("**/*.jsonl"):
+        if f.stat().st_mtime < since:
+            continue
+        project = f.relative_to(projects_dir).parts[0]
+        where = "sub" if "subagents" in f.parts else "main"
+        for line in f.open(encoding="utf-8", errors="replace"):
+            if '"usage"' not in line:
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            m = r.get("message") if isinstance(r, dict) else None
+            if not isinstance(m, dict) or not m.get("usage") or not m.get("id") or m["id"] in seen:
+                continue
+            if _ts_epoch(r.get("timestamp")) < since:
+                continue
+            family = next((k for k in CLAUDE_PRICES if k in (m.get("model") or "")), None)
+            if not family:
+                continue
+            seen.add(m["id"])
+            key = (project, family, where)
+            agg[key] = agg.get(key, 0.0) + usage_usd(family, m["usage"])
+    total = sum(agg.values())
+    by_family: dict[str, float] = {}
+    by_where: dict[str, float] = {}
+    by_project: dict[str, float] = {}
+    for (proj, fam, where), v in agg.items():
+        by_family[fam] = by_family.get(fam, 0.0) + v
+        by_where[where] = by_where.get(where, 0.0) + v
+        by_project[proj] = by_project.get(proj, 0.0) + v
+    data = {"days": days, "total_usd_eq": round(total, 2), "family": by_family, "where": by_where,
+            "project": by_project}
+    pct = lambda v: f"{v / total:.0%}" if total else "-"  # noqa: E731
+    lines = [f"Claude Code at list prices · last {days} days · ${total:,.0f} equivalent"]
+    if statusline and statusline.exists():
+        windows = json.loads(statusline.read_text()).get("windows", [])
+        weekly = next((w for w in windows if w.get("kind") == "weekly"), None)
+        if weekly:
+            data["weekly_used_percent"] = weekly["used_percent"]
+            resets = iso(dt.datetime.fromtimestamp(weekly["resets_at"], dt.UTC))
+            lines.append(f"weekly quota now at {weekly['used_percent']:.0f} % (resets {resets})")
+
+    def share(d: dict) -> str:
+        return " · ".join(f"{k} ${v:,.0f} ({pct(v)})" for k, v in sorted(d.items(), key=lambda x: -x[1]))
+    lines.append("model:     " + share(by_family))
+    lines.append("thread:    " + share(by_where))
+    lines.append("top projects:")
+    for proj, v in sorted(by_project.items(), key=lambda x: -x[1])[:10]:
+        lines.append(f"  {proj[:60]:60} ${v:,.0f} ({pct(v)})")
+    return "\n".join(lines), data
+
+
+def cmd_route(args: argparse.Namespace) -> int:
+    route = pick_route(load_config())
+    print(json.dumps(route, indent=1) if args.json else f"{route['route']}: {' → '.join(route['chain'])}"
+          + (f" · verify {route['verify']}" if route.get("verify") else "") + f"\n{route['reason']}")
+    return EXIT_OK
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    """The elephant writes the goldfish plan: read-only, billed by the same route as the executors."""
+    cfg = load_config()
+    route = pick_route(cfg)
+    planners = cfg.get("planner") or {}
+    name = args.planner or planners.get(route["route"]) or planners.get("subscription")
+    if not name or name not in cfg["providers"]:
+        raise ConfigError("no planner: set planner.subscription / planner.api in config or pass --planner")
+    pcfg = cfg["providers"][name]
+    if pcfg.get("kind") != "claude":
+        raise ConfigError(f"planner '{name}' must be a 'claude' provider")
+    budget = args.max_budget if args.max_budget is not None else pcfg.get("max_budget_usd")
+    goal = Path(args.goal[1:]).read_text(encoding="utf-8") if args.goal.startswith("@") else args.goal
+    cwd = Path(args.cwd or os.getcwd()).resolve()
+    run_id = now().strftime("%Y%m%d-%H%M%S") + "-plan"
+    run_dir = RUNS_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    secrets = load_env()
+    key = provider_key(pcfg, secrets)
+    model = pcfg["models"][args.tier]
+    env, config_dir = claude_env(pcfg, key, model)
+    sfile = run_dir / "planner-settings.json"
+    sfile.write_text(json.dumps(executor_profile_settings()), encoding="utf-8")
+    log(f"plan by {name}/{model} · route {route['route']} ({route['reason']})"
+        + (f" · budget ${budget:g}" if budget else ""))
+    if len(goal) > PLAN_GOAL_WARN_CHARS:
+        log(f"warning: goal is {len(goal)} chars (> {PLAN_GOAL_WARN_CHARS}); a goal this big tends to burn the "
+            "planner budget exploring. Consider splitting it into several plans or raising --max-budget.")
+    # "project": the repo's own CLAUDE.md and settings are what a planner needs; the user's are not.
+    res = run_claude(PLANNER_PROMPT.replace("{budget}", f"${budget:g}" if budget else "unlimited") + "\n## Goal\n" + goal, cwd, run_dir, "planner", model=model, env=env,
+                     config_dir=config_dir, timeout_s=pcfg.get("timeout_s", 1800), setting_sources="project",
+                     tools=PLANNER_TOOLS, settings_file=sfile, max_budget=budget,
+                     bin_name=pcfg.get("bin", "claude"), effort=pcfg.get("effort"))
+    tokens = norm_usage(res.get("usage"))
+    cost = attempt_cost(pcfg, model, res)
+    ledger_append({"ts": iso(now()), "run_id": run_id, "role": "planner", "provider": name, "model": model,
+                   "billing": pcfg.get("billing", "paid"), "ok": res["ok"], **tokens, "cost_usd": cost,
+                   "route": route["route"], "trial": args.trial})
+    if not res["ok"] or not TASK_RE.search(res.get("text") or ""):
+        reason = res.get("reason") or "no `## Task` sections in its answer"
+        hint = ""
+        if res.get("subtype") == "error_max_budget_usd":
+            hint = (f"\nThe planner ran out of budget while exploring and wrote no plan. Next: re-run with a higher "
+                    f"--max-budget (now {budget:g}), or split the goal and plan the first slice only.")
+        partial = (res.get("text") or "").strip()
+        if partial:
+            pf = Path(args.out).resolve().with_suffix(".partial.md")
+            pf.write_text(partial + "\n", encoding="utf-8")
+            hint += f"\nPartial answer saved to {pf}"
+        raise ConfigError(f"planner failed: {reason}{hint}\nrun dir: {run_dir}")
+    out = Path(args.out).resolve()
+    out.write_text(res["text"].strip() + "\n", encoding="utf-8")
+    _, tasks = parse_tasks(res["text"])
+    print(f"{out} · {len(tasks)} tasks · {name}/{model}" + (f" · ${cost:.3f}" if cost else ""))
+    return EXIT_OK
+
+
+def cmd_quota(args: argparse.Namespace) -> int:
+    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    projects = Path(args.projects_dir).expanduser() if args.projects_dir else base / "projects"
+    text, data = quota_summary(args.days, projects, Path(args.statusline).expanduser() if args.statusline else None)
+    if args.snapshot:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(STATE_DIR / "quota.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": iso(now()), "trial": args.trial, **data}, ensure_ascii=False) + "\n")
+    print(json.dumps(data, indent=1) if args.json else text)
     return EXIT_OK
 
 
@@ -1601,10 +2090,15 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--plan", required=True, help="Markdown file with the plan (the contract)")
     r.add_argument("--cwd", default=None, help="target git repo (default: current directory)")
     r.add_argument("--tier", choices=TIERS, default="flash", help="which model of each provider to use")
-    r.add_argument("--chain", default=None, help="comma-separated provider order, overrides config")
+    r.add_argument("--chain", default=None, help="comma-separated provider order, or `auto` (see `route`)")
     r.add_argument("--verify", default=None, help="verifier provider name, or 'none'")
     r.add_argument("--max-rounds", type=int, default=None, help="execution+verification rounds (default 2)")
     r.add_argument("--on-event", default=None, help="shell command that receives each event as JSON on stdin")
+    r.add_argument("--goldfish", action="store_true",
+                   help="one fresh, lean executor per `## Task` section; each task's `check:` runs before the review")
+    r.add_argument("--elephant", default=None, help="provider that reviews the combined diff (alias of --verify)")
+    r.add_argument("--check-timeout", type=int, default=600, help="seconds per task check (goldfish)")
+    r.add_argument("--trial", default=None, help="label stored with the run, to compare workflows over weeks")
     r.set_defaults(func=cmd_run)
     v = sub.add_parser("verify", help="re-run only the verification of a previous run")
     v.add_argument("--run", required=True, help="run id (see `status`)")
@@ -1619,8 +2113,39 @@ def build_parser() -> argparse.ArgumentParser:
     u.set_defaults(func=cmd_usage)
     cp = sub.add_parser("compare", help="executors side by side: verified runs, rounds, time and cost")
     cp.add_argument("--days", type=int, default=7)
+    cp.add_argument("--by", choices=("provider", "mode", "trial"), default="provider")
     cp.add_argument("--json", action="store_true")
     cp.set_defaults(func=cmd_compare)
+
+    pl = sub.add_parser("plan", help="the elephant (e.g. Fable) writes a goldfish plan, read-only, billed by route")
+    pl.add_argument("goal", help="the goal, or @file with it")
+    pl.add_argument("-o", "--out", required=True, help="where to write the plan")
+    pl.add_argument("--cwd", default=None)
+    pl.add_argument("--planner", default=None, help="provider (default: config planner.<route>)")
+    pl.add_argument("--tier", choices=TIERS, default="pro")
+    pl.add_argument("--max-budget", type=float, default=None, metavar="USD",
+                    help="planner spend cap (default: the planner provider's max_budget_usd)")
+    pl.add_argument("--trial", default=None)
+    pl.set_defaults(func=cmd_plan)
+
+    ro = sub.add_parser("route", help="where `--chain auto` would send work right now, and why")
+    ro.add_argument("--json", action="store_true")
+    ro.set_defaults(func=cmd_route)
+
+    rt = sub.add_parser("rate", help="your 1-5 score for a run's result (shows up in `compare`)")
+    rt.add_argument("run")
+    rt.add_argument("score", type=int)
+    rt.add_argument("--note", default=None)
+    rt.set_defaults(func=cmd_rate)
+
+    q = sub.add_parser("quota", help="interactive Claude Code spend at list prices, from session transcripts")
+    q.add_argument("--days", type=int, default=7)
+    q.add_argument("--projects-dir", default=None, help="default: $CLAUDE_CONFIG_DIR/projects")
+    q.add_argument("--statusline", default=None, help="statusline JSON with a weekly window (used_percent)")
+    q.add_argument("--snapshot", action="store_true", help="append the totals to the state dir's quota.jsonl")
+    q.add_argument("--trial", default=None, help="label for the snapshot")
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=cmd_quota)
     c = sub.add_parser("cooldown", help="set or clear a provider cooldown by hand")
     c.add_argument("provider")
     c.add_argument("--minutes", type=int, default=60)

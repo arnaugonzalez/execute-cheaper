@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- `run --goldfish`: one fresh, lean executor per `## Task` section (no CLAUDE.md/settings/hooks,
+  six tools, secret deny rules via `--settings`), each task's `check:` run by execute-cheaper with
+  one retry, and a single review of the combined diff. `--elephant` is an alias of `--verify`.
+- Plan `check:` lines run after every execution round in every mode. A failure starts a repair
+  round without paying the reviewer. Passing checks go to the reviewer so it doesn't re-run them.
+- `run --trial LABEL`, `rate RUN_ID 1-5`, `compare --by provider|mode|trial` with cost per verified
+  run and human score.
+- `quota`: interactive Claude Code spend at list prices from session transcripts, by project, model
+  and main thread vs subagents; `--snapshot` for week-over-week comparison.
+- `budget.monthly_usd` + `budget.extra_ledgers`: paid routes are skipped once the month's spend
+  reaches the cap.
+- `--chain auto` + `route`: same models, billed to the subscription while its weekly quota keeps pace
+  with the week, to the API key while the month's budget keeps pace with the month, else a fallback chain.
+- `plan`: a read-only planner (e.g. Fable) writes the goldfish plan, billed by the same route, with a
+  `## Not delegated` section; `key_file` for keys kept by other tools.
+- `check:` accepts multi-line commands inside backticks (a planner wrote one).
+- Fix: `usage` no longer counts outcome rows as calls.
+
 ## 0.1.0 — 2026-10-29
 
 First public release.
